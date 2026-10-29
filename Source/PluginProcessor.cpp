@@ -163,7 +163,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 
         const float transient = juce::jlimit(0.0f, 1.0f,
             (fastEnvelope - slowEnvelope) / (fastEnvelope + 1.0e-5f));
-        // Cap the lift at +6 dB rather than tripling the threshold at full DETAIL.
+        // DETAIL scales the transient threshold lift up to 2x at full transient level.
         blockTransientActivity = juce::jmax(blockTransientActivity, transient);
         const int bin = juce::jmin(scopeSize - 1, transientScopeBin++ * scopeSize / juce::jmax(1, samples * (getTotalNumInputChannels() == 2 ? 4 : 1)));
         transientScope[(size_t)bin].store(transient, std::memory_order_relaxed);
