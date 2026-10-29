@@ -81,24 +81,25 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
         g.setColour(juce::Colour(0xff9aa0a8));
         g.drawText(db == 0 ? "0 dB" : "-" + juce::String(db), 36, juce::roundToInt(y) + 2, 42, 13, juce::Justification::left);
     }
-    const float gains[3] = { processor.getFoldbackGain(0), processor.getFoldbackGain(1), processor.getFoldbackGain(2) };
-    const float anchor[3] = { 50.0f, 316.2278f, 5000.0f };
+    std::array<float, DPC_vstAudioProcessor::foldbackBands> gains {};
+    for (int band = 0; band < DPC_vstAudioProcessor::foldbackBands; ++band)
+        gains[(size_t)band] = processor.getFoldbackGain(band);
     juce::Path curve, area;
     constexpr int count = 192;
     for (int i = 0; i < count; ++i)
     {
         const float fraction = static_cast<float>(i) / static_cast<float>(count - 1);
         const float hz = 20.0f * std::pow(1000.0f, fraction);
-        float gain = gains[0];
-        if (hz >= anchor[2]) gain = gains[2];
-        else if (hz > anchor[0])
-        {
-            const int band = hz < anchor[1] ? 0 : 1;
-            const float t = juce::jlimit(0.0f, 1.0f, (std::log(hz) - std::log(anchor[band])) /
-                (std::log(anchor[band + 1]) - std::log(anchor[band])));
-            const float smooth = t * t * (3.0f - 2.0f * t);
-            gain = gains[band] + smooth * (gains[band + 1] - gains[band]);
-        }
+        // Interpolate between 24 log-spaced DSP band measurements.
+        const float bandPosition = juce::jlimit(0.0f,
+            static_cast<float>(DPC_vstAudioProcessor::foldbackBands - 1),
+            std::log(hz / 20.0f) / std::log(1000.0f) *
+                static_cast<float>(DPC_vstAudioProcessor::foldbackBands) - 0.5f);
+        const int lower = juce::jlimit(0, DPC_vstAudioProcessor::foldbackBands - 1,
+            static_cast<int>(bandPosition));
+        const int upper = juce::jmin(DPC_vstAudioProcessor::foldbackBands - 1, lower + 1);
+        const float t = bandPosition - static_cast<float>(lower);
+        const float gain = gains[(size_t)lower] + t * (gains[(size_t)upper] - gains[(size_t)lower]);
         const float reduction = juce::jlimit(0.0f, 12.0f,
             -juce::Decibels::gainToDecibels(juce::jmax(1.0e-5f, gain)));
         const float x = graph.getX() + fraction * graph.getWidth();
@@ -123,7 +124,7 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xff949ba5));
     g.setFont(10.0f);
     g.drawText("0 dB = preserved  |  Downward = more DSP foldback  |  CLIP and DETAIL", 36, 330, 640, 18, juce::Justification::left);
-    g.drawText("Curve interpolates actual DSP gains across 3 bands; not 192 independent frequency detectors.",
+    g.drawText("Curve interpolates 24 real DSP bands across 20 Hz - 20 kHz.",
                36, 351, 640, 18, juce::Justification::left);
 }
 
