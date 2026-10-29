@@ -35,9 +35,24 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     outputGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(
         parameters.getRawParameterValue("OUTPUT")->load()));
 
-    clipThreshold.reset(sampleRate * (stereo ? 4.0 : 1.0), 0.005);
+    const double processingRate = sampleRate * (stereo ? 4.0 : 1.0);
+    clipThreshold.reset(processingRate, 0.005);
     clipThreshold.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(
         parameters.getRawParameterValue("CLIP")->load()));
+
+    const auto envelopeCoeff = [processingRate](float timeSeconds)
+    {
+        return std::exp(-1.0f / (static_cast<float>(processingRate) * timeSeconds));
+    };
+    fastAttackCoeff = envelopeCoeff(0.0015f);
+    fastReleaseCoeff = envelopeCoeff(0.040f);
+    slowAttackCoeff = envelopeCoeff(0.025f);
+    slowReleaseCoeff = envelopeCoeff(0.180f);
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        fastEnvelope[ch] = 0.0f;
+        slowEnvelope[ch] = 0.0f;
+    }
     wetMix.reset(sampleRate, 0.005);
     wetMix.setCurrentAndTargetValue(parameters.getRawParameterValue("MIX")->load());
 
@@ -93,7 +108,9 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     for (int ch = 0; ch < channels; ++ch)
         dryBuffer.copyFrom(ch, 0, buffer, ch, 0, samples);
 
-    const auto shapeSample = [mode, detail, ironNorm, heatNorm](float input, float threshold)
+    // DETAIL is a transient-preservation control, not a blend between waveshapers.
+    // Fast/slow envelope divergence raises the effective threshold briefly on attacks.
+    const auto shapeSample = [mode, ironNorm, heatNorm](float input, float threshold)
     {
         const float safeThreshold = juce::jmax(threshold, 1.0e-6f);
         const float driven = input / safeThreshold;
@@ -106,9 +123,22 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         else
             y = std::tanh(driven * 1.8f) / heatNorm;
 
-        const float detailCurve = std::tanh(driven * 0.7f) / std::tanh(0.7f);
-        y = y * (1.0f - detail) + detailCurve * detail;
         return juce::jlimit(-1.0f, 1.0f, y) * safeThreshold;
+    };
+
+    const auto getTransientThreshold = [this, detail](float input, int channel, float baseThreshold)
+    {
+        const float level = std::abs(input);
+        const float fastCoeff = level > fastEnvelope[channel] ? fastAttackCoeff : fastReleaseCoeff;
+        const float slowCoeff = level > slowEnvelope[channel] ? slowAttackCoeff : slowReleaseCoeff;
+
+        fastEnvelope[channel] = fastCoeff * fastEnvelope[channel] + (1.0f - fastCoeff) * level;
+        slowEnvelope[channel] = slowCoeff * slowEnvelope[channel] + (1.0f - slowCoeff) * level;
+
+        const float transient = juce::jlimit(0.0f, 1.0f,
+            (fastEnvelope[channel] - slowEnvelope[channel]) / (fastEnvelope[channel] + 1.0e-5f));
+        const float thresholdLift = 1.0f + detail * transient * 2.0f;
+        return baseThreshold * thresholdLift;
     };
 
     if (channels == 2)
@@ -124,7 +154,9 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
             for (size_t ch = 0; ch < wetBlock.getNumChannels(); ++ch)
             {
                 auto* data = wetBlock.getChannelPointer(ch);
-                data[i] = shapeSample(data[i], threshold);
+                const auto channel = static_cast<int>(ch);
+                const float transientAwareThreshold = getTransientThreshold(data[i], channel, threshold);
+                data[i] = shapeSample(data[i], transientAwareThreshold);
             }
         }
         oversampling.processSamplesDown(block);
@@ -137,7 +169,11 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         {
             const float threshold = clipThreshold.getNextValue();
             for (int ch = 0; ch < channels; ++ch)
-                buffer.setSample(ch, i, shapeSample(buffer.getSample(ch, i), threshold));
+            {
+                const float input = buffer.getSample(ch, i);
+                const float transientAwareThreshold = getTransientThreshold(input, ch, threshold);
+                buffer.setSample(ch, i, shapeSample(input, transientAwareThreshold));
+            }
         }
     }
 
