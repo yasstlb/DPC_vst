@@ -40,6 +40,8 @@ DPC_vstAudioProcessorEditor::DPC_vstAudioProcessorEditor(DPC_vstAudioProcessor& 
     outputAttachment = std::make_unique<SliderAttachment>(processor.parameters, "OUTPUT", outputSlider);
 
     setSize(720, 500);
+    inputSpectrum.fill(-72.0f);
+    outputSpectrum.fill(-72.0f);
     startTimerHz(30);
 }
 
@@ -55,114 +57,159 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     g.fillRoundedRectangle(24.0f, 76.0f, 672.0f, 2.0f, 1.0f);
     g.setColour(juce::Colour(0xff777b82));
     g.setFont(12.0f);
-    g.drawText("CLIPPER  /  LIVE DSP VIEW", 26, 44, 400, 20, juce::Justification::left);
+    g.drawText("CLIPPER  /  LIVE SPECTRAL RESPONSE", 26, 44, 400, 20, juce::Justification::left);
 
-    // Enlarged clip-history view: grey input and amber processed signal.
-    // This is a block snapshot, not a scrolling history or FFT spectrum.
-    const juce::Rectangle<float> scope(28.0f, 88.0f, 664.0f, 108.0f);
+    const juce::Rectangle<float> graph(32.0f, 94.0f, 656.0f, 210.0f);
     g.setColour(juce::Colour(0xff101114));
-    g.fillRoundedRectangle(scope, 6.0f);
-    const float clipDb = processor.parameters.getRawParameterValue("CLIP")->load();
-    const float threshold = juce::Decibels::decibelsToGain(-clipDb);
-    const float scale = scope.getHeight() * 0.44f;
-    const float centre = scope.getCentreY();
-    const float topLimit = centre - threshold * scale;
-    const float bottomLimit = centre + threshold * scale;
-    g.setColour(juce::Colour(0xff30343a));
-    g.drawHorizontalLine(juce::roundToInt(centre), scope.getX(), scope.getRight());
-    g.setColour(juce::Colour(0x44e0a14b));
-    g.fillRect(scope.getX(), topLimit - 1.0f, scope.getWidth(), 2.0f);
-    g.fillRect(scope.getX(), bottomLimit - 1.0f, scope.getWidth(), 2.0f);
+    g.fillRoundedRectangle(graph, 7.0f);
 
-    juce::Path inputFill, outputLine;
-    inputFill.startNewSubPath(scope.getX(), centre);
-    for (int i = 0; i < DPC_vstAudioProcessor::scopeSize; ++i)
+    // Log-frequency FFT display, 20 Hz to Nyquist (maximum 20 kHz).
+    const float sr = static_cast<float>(processor.getSpectrumSampleRate());
+    const float topFrequency = juce::jmin(20000.0f, sr * 0.5f);
+    const auto frequencyToX = [&](float frequency)
     {
-        const float x = scope.getX() + scope.getWidth() * static_cast<float>(i)
-            / static_cast<float>(DPC_vstAudioProcessor::scopeSize - 1);
-        const float input = juce::jlimit(-1.0f, 1.0f, processor.getInputScopeSample(i));
-        const float output = juce::jlimit(-1.0f, 1.0f, processor.getOutputScopeSample(i));
-        const float inY = centre - input * scale;
-        const float outY = centre - output * scale;
-        inputFill.lineTo(x, inY);
-        if (i == 0) outputLine.startNewSubPath(x, outY);
-        else outputLine.lineTo(x, outY);
-        // Highlight only input excursions beyond the actual base clip threshold.
-        if (std::abs(input) > threshold)
+        return graph.getX() + graph.getWidth() *
+            (std::log(frequency / 20.0f) / std::log(topFrequency / 20.0f));
+    };
+    g.setFont(10.0f);
+    for (float freq : { 20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f, 20000.0f })
+    {
+        if (freq > topFrequency) continue;
+        const float x = frequencyToX(freq);
+        g.setColour(juce::Colour(0xff303238));
+        g.drawVerticalLine(juce::roundToInt(x), graph.getY(), graph.getBottom());
+        g.setColour(juce::Colour(0xff8b9099));
+        g.drawText(freq >= 1000.0f ? juce::String(freq / 1000.0f, 0) + "k" : juce::String(freq, 0),
+                   juce::roundToInt(x - 16.0f), 308, 34, 14, juce::Justification::centred);
+    }
+    for (int db = -72; db <= 0; db += 12)
+    {
+        const float y = graph.getY() + graph.getHeight() * (-static_cast<float>(db) / 72.0f);
+        g.setColour(juce::Colour(0xff303238));
+        g.drawHorizontalLine(juce::roundToInt(y), graph.getX(), graph.getRight());
+        g.setColour(juce::Colour(0xff8b9099));
+        g.drawText(juce::String(db), 37, juce::roundToInt(y) + 1, 30, 12, juce::Justification::left);
+    }
+    const float midStart = frequencyToX(100.0f);
+    const float midEnd = frequencyToX(1000.0f);
+    g.setColour(juce::Colour(0x174cacc7));
+    g.fillRect(midStart, graph.getY(), midEnd - midStart, graph.getHeight());
+
+    const auto dbToY = [&](float db)
+    {
+        return graph.getY() + graph.getHeight() *
+            (1.0f - (juce::jlimit(-72.0f, 0.0f, db) + 72.0f) / 72.0f);
+    };
+    juce::Path inputLine, outputLine, inputFill, reductionFill;
+    const int points = DPC_vstAudioProcessor::scopeSize;
+    for (int i = 0; i < points; ++i)
+    {
+        const float frequency = 20.0f * std::pow(topFrequency / 20.0f,
+            static_cast<float>(i) / static_cast<float>(points - 1));
+        const float x = frequencyToX(frequency);
+        const float inputY = dbToY(inputSpectrum[(size_t)i]);
+        const float outputY = dbToY(outputSpectrum[(size_t)i]);
+        if (i == 0)
         {
-            g.setColour(juce::Colour(0x88ff9c3d));
-            const float limitY = input > 0.0f ? topLimit : bottomLimit;
-            g.drawVerticalLine(juce::roundToInt(x), juce::jmin(inY, limitY), juce::jmax(inY, limitY));
+            inputLine.startNewSubPath(x, inputY);
+            outputLine.startNewSubPath(x, outputY);
+            inputFill.startNewSubPath(x, graph.getBottom());
+        }
+        else
+        {
+            inputLine.lineTo(x, inputY);
+            outputLine.lineTo(x, outputY);
+        }
+        inputFill.lineTo(x, inputY);
+        // Orange shading only where the actual processed spectrum is lower.
+        if (outputY > inputY + 0.25f)
+        {
+            g.setColour(juce::Colour(0x44ef8e36));
+            g.drawVerticalLine(juce::roundToInt(x), inputY, outputY);
         }
     }
-    inputFill.lineTo(scope.getRight(), centre);
+    inputFill.lineTo(graph.getRight(), graph.getBottom());
     inputFill.closeSubPath();
-    g.setColour(juce::Colour(0x667f8793));
+    g.setColour(juce::Colour(0x397e8998));
     g.fillPath(inputFill);
+    g.setColour(juce::Colour(0xff8793a3));
+    g.strokePath(inputLine, juce::PathStrokeType(1.3f));
     g.setColour(accent);
-    g.strokePath(outputLine, juce::PathStrokeType(1.7f));
-    g.setFont(10.0f);
-    g.setColour(juce::Colour(0xffffc47a));
-    g.drawText("CLIP THRESHOLD  -" + juce::String(clipDb, 1) + " dB",
-               405, 91, 275, 16, juce::Justification::right);
-    // The three meters display measured per-band gain reduction from the DSP.
-    const juce::Rectangle<float> transientView(28.0f, 204.0f, 664.0f, 34.0f);
-    g.setColour(juce::Colour(0xff202226));
-    g.fillRoundedRectangle(transientView, 4.0f);
-    const char* names[3] = { "<100 Hz", "100-1000 Hz", ">1 kHz" };
-    for (int b = 0; b < 3; ++b)
-    {
-        const float x = transientView.getX() + 6.0f + b * 219.0f;
-        const float reduction = juce::jlimit(0.0f, 1.0f, processor.getBandDuck(b));
-        g.setColour(juce::Colour(0xff363a40));
-        g.fillRoundedRectangle(x, 223.0f, 120.0f, 6.0f, 2.0f);
-        g.setColour(b == 1 ? accent : juce::Colour(0xff70c7a0));
-        g.fillRoundedRectangle(x, 223.0f, 120.0f * reduction, 6.0f, 2.0f);
-        g.setFont(10.0f);
-        g.drawText(juce::String(names[b]) + "  -" + juce::String(reduction * 100.0f, 0) + "%",
-                   juce::roundToInt(x + 123.0f), 217, 92, 16, juce::Justification::left);
-    }
-    g.setColour(juce::Colour(0xff9ba1aa));
-    g.setFont(10.0f);
-    g.drawText("LIVE FREQUENCY-BAND DUCKING", 36, 205, 400, 14, juce::Justification::left);
-
+    g.strokePath(outputLine, juce::PathStrokeType(2.1f));
     g.setFont(11.0f);
-    g.setColour(juce::Colour(0xff9ba1aa));
-    g.drawText("INPUT", 38, 98, 60, 16, juce::Justification::left);
+    g.setColour(juce::Colour(0xffa1a8b2));
+    g.drawText("INPUT", 40, 98, 60, 16, juce::Justification::left);
     g.setColour(accent);
-    g.drawText("OUTPUT", 98, 98, 70, 16, juce::Justification::left);
-
-    const float inDb = processor.getInputPeak() > 1.0e-6f ? juce::Decibels::gainToDecibels(processor.getInputPeak()) : -120.0f;
-    const float outDb = processor.getOutputPeak() > 1.0e-6f ? juce::Decibels::gainToDecibels(processor.getOutputPeak()) : -120.0f;
-    const auto metricsY = 250;
+    g.drawText("PROCESSED", 104, 98, 110, 16, juce::Justification::left);
     g.setColour(juce::Colour(0xffb8b8b8));
-    g.setFont(13.0f);
-    g.drawText("IN PEAK  " + juce::String(inDb, 1) + " dBFS", 30, metricsY, 160, 22, juce::Justification::left);
-    g.drawText("OUT PEAK  " + juce::String(outDb, 1) + " dBFS", 205, metricsY, 180, 22, juce::Justification::left);
-    g.drawText("CLIP ACTIVITY  " + juce::String(processor.getClipActivity() > 0.0f ? "ACTIVE" : "IDLE"),
-               405, metricsY, 180, 22, juce::Justification::left);
-    g.drawText("ATTACK RESPONSE  " + juce::String(processor.getTransientActivity() * 100.0f, 0) + "%",
-               30, metricsY + 24, 260, 22, juce::Justification::left);
-    g.setFont(11.0f);
-    g.setColour(juce::Colour(0xff777b82));
-    g.drawText("Grey: input  |  Amber: output  |  Orange spikes: above base threshold  |  Bars: band ducking",
-               30, metricsY + 48, 650, 18, juce::Justification::left);
+    g.drawText("SPECTRAL REDUCTION  /  REAL AUDIO FFT", 36, 330, 360, 20, juce::Justification::left);
+    g.setColour(juce::Colour(0xff858a92));
+    g.setFont(10.0f);
+    g.drawText("Orange shading = measured reduction; spectral boost and harmonics remain visible.",
+               36, 351, 640, 18, juce::Justification::left);
+}
+
+void DPC_vstAudioProcessorEditor::timerCallback()
+{
+    updateSpectrum();
+    repaint();
+}
+
+void DPC_vstAudioProcessorEditor::updateSpectrum()
+{
+    constexpr int n = DPC_vstAudioProcessor::fftSize;
+    const int writePosition = processor.getSpectrumWritePosition();
+    const float sampleRate = static_cast<float>(processor.getSpectrumSampleRate());
+    const float highestFrequency = juce::jmin(20000.0f, sampleRate * 0.5f);
+    if (sampleRate <= 0.0f || highestFrequency <= 20.0f) return;
+    for (int i = 0; i < n; ++i)
+    {
+        const int idx = (writePosition + i) % n;
+        const float hann = 0.5f - 0.5f * std::cos(juce::MathConstants<float>::twoPi
+                                                  * static_cast<float>(i) / static_cast<float>(n - 1));
+        fftInput[(size_t)i] = processor.getSpectrumInput(idx) * hann;
+        fftOutput[(size_t)i] = processor.getSpectrumOutput(idx) * hann;
+        fftInput[(size_t)(i + n)] = 0.0f;
+        fftOutput[(size_t)(i + n)] = 0.0f;
+    }
+    fft.performFrequencyOnlyForwardTransform(fftInput.data());
+    fft.performFrequencyOnlyForwardTransform(fftOutput.data());
+    const float normalization = 4.0f / static_cast<float>(n);
+    for (int i = 0; i < DPC_vstAudioProcessor::scopeSize; ++i)
+    {
+        const float position = static_cast<float>(i) / static_cast<float>(DPC_vstAudioProcessor::scopeSize - 1);
+        const float frequency = 20.0f * std::pow(highestFrequency / 20.0f, position);
+        const float bin = frequency * static_cast<float>(n) / sampleRate;
+        const int lower = juce::jlimit(1, n / 2 - 2, static_cast<int>(bin));
+        const float fraction = juce::jlimit(0.0f, 1.0f, bin - static_cast<float>(lower));
+        const auto magnitude = [lower, fraction](const auto& data)
+        {
+            return data[(size_t)lower] + fraction * (data[(size_t)(lower + 1)] - data[(size_t)lower]);
+        };
+        const float inputDb = juce::Decibels::gainToDecibels(
+            juce::jmax(1.0e-8f, normalization * magnitude(fftInput)));
+        const float outputDb = juce::Decibels::gainToDecibels(
+            juce::jmax(1.0e-8f, normalization * magnitude(fftOutput)));
+        // A single smoothing constant keeps both overlays responsive and readable.
+        inputSpectrum[(size_t)i] += 0.28f * (inputDb - inputSpectrum[(size_t)i]);
+        outputSpectrum[(size_t)i] += 0.28f * (outputDb - outputSpectrum[(size_t)i]);
+    }
 }
 
 void DPC_vstAudioProcessorEditor::resized()
 {
     titleLabel.setBounds(24, 14, 160, 34);
-    modeLabel.setBounds(28, 326, 150, 20);
-    modeBox.setBounds(28, 350, 150, 28);
+    modeLabel.setBounds(28, 378, 150, 20);
+    modeBox.setBounds(28, 402, 150, 28);
 
     const int x[] = { 190, 350, 510 };
     juce::Label* labels[] = { &clipLabel, &detailLabel, &mixLabel };
     juce::Slider* sliders[] = { &clipSlider, &detailSlider, &mixSlider };
     for (int i = 0; i < 3; ++i)
     {
-        labels[i]->setBounds(x[i], 326, 130, 20);
-        sliders[i]->setBounds(x[i], 346, 120, 130);
+        labels[i]->setBounds(x[i], 378, 130, 20);
+        sliders[i]->setBounds(x[i], 398, 120, 90);
     }
-    outputLabel.setBounds(28, 392, 100, 20);
-    outputSlider.setBounds(20, 405, 130, 80);
+    outputLabel.setBounds(28, 441, 100, 18);
+    outputSlider.setBounds(20, 455, 130, 40);
 }
