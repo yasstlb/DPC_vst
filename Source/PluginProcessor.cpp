@@ -29,11 +29,13 @@ juce::AudioProcessorValueTreeState::ParameterLayout DPC_vstAudioProcessor::creat
 
 void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
+    const bool stereo = getTotalNumInputChannels() == 2;
+
     outputGain.reset(sampleRate, 0.02);
     outputGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(
         parameters.getRawParameterValue("OUTPUT")->load()));
 
-    clipThreshold.reset(sampleRate * 4.0, 0.005);
+    clipThreshold.reset(sampleRate * (stereo ? 4.0 : 1.0), 0.005);
     clipThreshold.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(
         parameters.getRawParameterValue("CLIP")->load()));
     wetMix.reset(sampleRate, 0.005);
@@ -42,7 +44,7 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     dryBuffer.setSize(2, juce::jmax(1, samplesPerBlock), false, false, true);
     oversampling.initProcessing(static_cast<size_t>(juce::jmax(1, samplesPerBlock)));
     oversampling.reset();
-    oversamplingLatency = juce::roundToInt(oversampling.getLatencyInSamples());
+    oversamplingLatency = stereo ? juce::roundToInt(oversampling.getLatencyInSamples()) : 0;
 
     dryDelay.setMaximumDelayInSamples(8191);
     dryDelay.prepare({ sampleRate, static_cast<juce::uint32>(juce::jmax(1, samplesPerBlock)), 2 });
@@ -71,11 +73,11 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     const int channels = getTotalNumInputChannels();
     const int samples = buffer.getNumSamples();
     const int mode = static_cast<int>(parameters.getRawParameterValue("MODE")->load());
-    const float clipDb = parameters.getRawParameterValue("CLIP")->load();
     const float detail = parameters.getRawParameterValue("DETAIL")->load();
-    const float mixTarget = parameters.getRawParameterValue("MIX")->load();
     const float outputDb = parameters.getRawParameterValue("OUTPUT")->load();
-    const float thresholdTarget = juce::Decibels::decibelsToGain(clipDb);
+    const float thresholdTarget = juce::Decibels::decibelsToGain(
+        parameters.getRawParameterValue("CLIP")->load());
+    const float mixTarget = parameters.getRawParameterValue("MIX")->load();
     const float ironNorm = std::tanh(1.08f);
     const float heatNorm = std::tanh(1.8f);
 
@@ -91,51 +93,77 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     for (int ch = 0; ch < channels; ++ch)
         dryBuffer.copyFrom(ch, 0, buffer, ch, 0, samples);
 
-    // Oversampling is used for stereo; mono hosts retain the same DSP curve
-    // without passing a one-channel block to the two-channel oversampler.
+    const auto shapeSample = [mode, detail, ironNorm, heatNorm](float input, float threshold)
+    {
+        const float safeThreshold = juce::jmax(threshold, 1.0e-6f);
+        const float driven = input / safeThreshold;
+        float y = 0.0f;
+
+        if (mode == 0)
+            y = juce::jlimit(-1.0f, 1.0f, driven);
+        else if (mode == 1)
+            y = std::tanh(driven + 0.08f * driven * driven) / ironNorm;
+        else
+            y = std::tanh(driven * 1.8f) / heatNorm;
+
+        const float detailCurve = std::tanh(driven * 0.7f) / std::tanh(0.7f);
+        y = y * (1.0f - detail) + detailCurve * detail;
+        return juce::jlimit(-1.0f, 1.0f, y) * safeThreshold;
+    };
+
     if (channels == 2)
     {
         auto block = juce::dsp::AudioBlock<float>(buffer);
         auto wetBlock = oversampling.processSamplesUp(block);
-        for (size_t ch = 0; ch < wetBlock.getNumChannels(); ++ch)
-        {
-            auto* data = wetBlock.getChannelPointer(ch);
-            for (size_t i = 0; i < wetBlock.getNumSamples(); ++i)
-            {
-                const float threshold = juce::jmax(clipThreshold.getCurrentValue(), 1.0e-6f);
-                const float driven = data[i] / threshold;
-                float y = 0.0f;
-                if (mode == 0)
-                    y = juce::jlimit(-1.0f, 1.0f, driven);
-                else if (mode == 1)
-                    y = std::tanh(driven + 0.08f * driven * driven) / ironNorm;
-                else
-                    y = std::tanh(driven * 1.8f) / heatNorm;
 
-                const float detailCurve = std::tanh(driven * 0.7f) / std::tanh(0.7f);
-                y = y * (1.0f - detail) + detailCurve * detail;
-                data[i] = juce::jlimit(-1.0f, 1.0f, y) * threshold;
-                clipThreshold.getNextValue();
+        // Advance the shared threshold ramp once per oversampled frame, not once
+        // per channel, so left and right remain under identical gain conditions.
+        for (size_t i = 0; i < wetBlock.getNumSamples(); ++i)
+        {
+            const float threshold = clipThreshold.getNextValue();
+            for (size_t ch = 0; ch < wetBlock.getNumChannels(); ++ch)
+            {
+                auto* data = wetBlock.getChannelPointer(ch);
+                data[i] = shapeSample(data[i], threshold);
             }
         }
         oversampling.processSamplesDown(block);
     }
+    else
+    {
+        // Mono uses the same shaping curve at the native sample rate. No
+        // oversampling latency is reported for this path.
+        for (int i = 0; i < samples; ++i)
+        {
+            const float threshold = clipThreshold.getNextValue();
+            for (int ch = 0; ch < channels; ++ch)
+                buffer.setSample(ch, i, shapeSample(buffer.getSample(ch, i), threshold));
+        }
+    }
 
-    // Delay the dry path by the oversampler latency, then mix at base rate.
-    // The delay is still applied in mono mode for consistent reported latency.
     for (int i = 0; i < samples; ++i)
     {
         const float gain = outputGain.getNextValue();
         const float wet = wetMix.getNextValue();
+
         for (int ch = 0; ch < channels; ++ch)
         {
             const float wetSample = buffer.getSample(ch, i);
-            const float drySample = dryBuffer.getSample(ch, i);
-            const float delayedDry = dryDelay.popSample(ch);
-            dryDelay.pushSample(ch, drySample);
-            const float mixed = channels == 2
-                ? (delayedDry + (wetSample - delayedDry) * wet)
-                : wetSample;
+            float mixed = wetSample;
+
+            if (channels == 2)
+            {
+                const float drySample = dryBuffer.getSample(ch, i);
+                const float delayedDry = dryDelay.popSample(ch);
+                dryDelay.pushSample(ch, drySample);
+                mixed = delayedDry + (wetSample - delayedDry) * wet;
+            }
+            else
+            {
+                const float drySample = dryBuffer.getSample(ch, i);
+                mixed = drySample + (wetSample - drySample) * wet;
+            }
+
             buffer.setSample(ch, i, mixed * gain);
         }
     }
