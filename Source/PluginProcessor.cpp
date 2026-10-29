@@ -38,7 +38,7 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     const double processingRate = sampleRate * (stereo ? 4.0 : 1.0);
     clipThreshold.reset(processingRate, 0.005);
     clipThreshold.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(
-        parameters.getRawParameterValue("CLIP")->load()));
+        -parameters.getRawParameterValue("CLIP")->load()));
 
     const auto envelopeCoeff = [processingRate](float timeSeconds)
     {
@@ -95,7 +95,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     const float detail = parameters.getRawParameterValue("DETAIL")->load();
     const float outputDb = parameters.getRawParameterValue("OUTPUT")->load();
     const float thresholdTarget = juce::Decibels::decibelsToGain(
-        parameters.getRawParameterValue("CLIP")->load());
+        -parameters.getRawParameterValue("CLIP")->load());
     const float mixTarget = parameters.getRawParameterValue("MIX")->load();
     const float ironNorm = std::tanh(1.08f);
     const float heatNorm = std::tanh(1.8f);
