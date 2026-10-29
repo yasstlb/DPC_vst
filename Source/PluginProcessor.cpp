@@ -48,6 +48,12 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     fastReleaseCoeff = envelopeCoeff(0.040f);
     slowAttackCoeff = envelopeCoeff(0.025f);
     slowReleaseCoeff = envelopeCoeff(0.180f);
+    for (auto& state : splitState) for (float& v : state) v = 0.0f;
+    for (float& v : bandFast) v = 0.0f;
+    for (float& v : bandSlow) v = 0.0f;
+    for (auto& v : bandDuck) v.store(0.0f, std::memory_order_relaxed);
+    splitCoeff[0] = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 100.0f / static_cast<float>(processingRate));
+    splitCoeff[1] = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * 1000.0f / static_cast<float>(processingRate));
     fastEnvelope = 0.0f;
     slowEnvelope = 0.0f;
     dcBlockerCoeff = std::exp(-2.0f * juce::MathConstants<float>::pi * 20.0f
@@ -135,6 +141,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     for (int ch = 0; ch < channels; ++ch)
         dryBuffer.copyFrom(ch, 0, buffer, ch, 0, samples);
 
+    float blockBandDuck[3] {};
     // DETAIL is a transient-preservation control, not a blend between waveshapers.
     // Fast/slow envelope divergence raises the effective threshold briefly on attacks.
     const auto shapeSample = [mode, ironNorm, heatNorm, clipAmount](float input, float threshold)
@@ -172,6 +179,23 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         return baseThreshold * thresholdLift;
     };
 
+    // Split the signal into complementary frequency regions. Each band's
+    // attack detector controls real attenuation of that band, not just UI data.
+    // Higher DETAIL retains attacks; higher CLIP increases selective foldback.
+    const auto updateBandGains = [this, detail, clipAmount](const float levels[3], float gains[3])
+    {
+        for (int b = 0; b < 3; ++b)
+        {
+            const float level = levels[b];
+            const float fc = level > bandFast[b] ? fastAttackCoeff : fastReleaseCoeff;
+            const float sc = level > bandSlow[b] ? slowAttackCoeff : slowReleaseCoeff;
+            bandFast[b] = fc * bandFast[b] + (1.0f - fc) * level;
+            bandSlow[b] = sc * bandSlow[b] + (1.0f - sc) * level;
+            const float attack = juce::jlimit(0.0f, 1.0f,
+                (bandFast[b] - bandSlow[b]) / (bandFast[b] + 1.0e-5f));
+            gains[b] = 1.0f - 0.75f * (clipAmount / 18.0f) * (1.0f - detail) * attack;
+        }
+    };
     const auto removeDc = [this](float input, int channel)
     {
         const float output = input - dcInput[channel] + dcBlockerCoeff * dcOutput[channel];
@@ -195,10 +219,31 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
                 std::abs(wetBlock.getSample(1, i)));
             const float transientAwareThreshold = getTransientThreshold(linkedLevel, threshold);
             if (linkedLevel > transientAwareThreshold) blockClipActivity = 1.0f;
+            // Linked stereo detector uses the louder band in either channel.
+            float levels[3] {}, gains[3] { 1.0f, 1.0f, 1.0f };
+            float l0 = 0.0f, l1 = 0.0f;
+            // Advance both channel splits once, then apply identical gains.
+            float splitBands[2][3] {};
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                const float x = wetBlock.getSample(static_cast<size_t>(ch), i);
+                splitState[ch][0] += splitCoeff[0] * (x - splitState[ch][0]);
+                splitState[ch][1] += splitCoeff[1] * (x - splitState[ch][1]);
+                splitBands[ch][0] = splitState[ch][0];
+                splitBands[ch][1] = splitState[ch][1] - splitState[ch][0];
+                splitBands[ch][2] = x - splitState[ch][1];
+                for (int b = 0; b < 3; ++b)
+                    levels[b] = juce::jmax(levels[b], std::abs(splitBands[ch][b]));
+            }
+            updateBandGains(levels, gains);
+            for (int b = 0; b < 3; ++b)
+                blockBandDuck[b] = juce::jmax(blockBandDuck[b], 1.0f - gains[b]);
             for (size_t ch = 0; ch < wetBlock.getNumChannels(); ++ch)
             {
                 auto* data = wetBlock.getChannelPointer(ch);
-                data[i] = removeDc(shapeSample(data[i], transientAwareThreshold), static_cast<int>(ch));
+                float folded = 0.0f;
+                for (int b = 0; b < 3; ++b) folded += splitBands[ch][b] * gains[b];
+                data[i] = removeDc(shapeSample(folded, transientAwareThreshold), static_cast<int>(ch));
             }
         }
         oversampling.processSamplesDown(block);
@@ -218,7 +263,20 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
             for (int ch = 0; ch < channels; ++ch)
             {
                 const float input = buffer.getSample(ch, i);
-                buffer.setSample(ch, i, removeDc(shapeSample(input, transientAwareThreshold), ch));
+                float levels[3] {}, gains[3] { 1.0f, 1.0f, 1.0f };
+                // Mono updates the same three band envelopes once per sample.
+                splitState[ch][0] += splitCoeff[0] * (input - splitState[ch][0]);
+                splitState[ch][1] += splitCoeff[1] * (input - splitState[ch][1]);
+                const float bands[3] = { splitState[ch][0], splitState[ch][1] - splitState[ch][0], input - splitState[ch][1] };
+                for (int b = 0; b < 3; ++b) levels[b] = std::abs(bands[b]);
+                updateBandGains(levels, gains);
+                float folded = 0.0f;
+                for (int b = 0; b < 3; ++b)
+                {
+                    folded += bands[b] * gains[b];
+                    blockBandDuck[b] = juce::jmax(blockBandDuck[b], 1.0f - gains[b]);
+                }
+                buffer.setSample(ch, i, removeDc(shapeSample(folded, transientAwareThreshold), ch));
             }
         }
     }
@@ -261,6 +319,8 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         sample /= static_cast<float>(juce::jmax(1, channels));
         outputScope[(size_t)bin].store(sample, std::memory_order_relaxed);
     }
+    for (int b = 0; b < 3; ++b)
+        bandDuck[(size_t)b].store(blockBandDuck[b], std::memory_order_relaxed);
     inputPeak.store(blockInputPeak, std::memory_order_relaxed);
     outputPeak.store(blockOutputPeak, std::memory_order_relaxed);
     clipActivity.store(blockClipActivity, std::memory_order_relaxed);
