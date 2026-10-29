@@ -40,5 +40,14 @@ private:
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> dryDelay { 8192 };
     int oversamplingLatency = 0;
     juce::AudioBuffer<float> dryBuffer;
+
+    // Independent envelope followers per channel drive transient-aware threshold lift.
+    float fastEnvelope[2] = { 0.0f, 0.0f };
+    float slowEnvelope[2] = { 0.0f, 0.0f };
+    float fastAttackCoeff = 0.0f;
+    float fastReleaseCoeff = 0.0f;
+    float slowAttackCoeff = 0.0f;
+    float slowReleaseCoeff = 0.0f;
+
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DPC_vstAudioProcessor)
 };
