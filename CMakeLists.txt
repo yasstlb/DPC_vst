@@ -36,6 +36,8 @@ juce_add_plugin(DPC_vst
     COPY_PLUGIN_AFTER_BUILD FALSE
 )
 
+juce_generate_juce_header(DPC_vst)
+
 target_sources(DPC_vst PRIVATE
     Source/PluginProcessor.cpp
     Source/PluginEditor.cpp
