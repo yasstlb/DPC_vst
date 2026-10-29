@@ -3,7 +3,8 @@
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
 
-class DPC_vstAudioProcessorEditor final : public juce::AudioProcessorEditor
+class DPC_vstAudioProcessorEditor final : public juce::AudioProcessorEditor,
+                                         private juce::Timer
 {
 public:
     explicit DPC_vstAudioProcessorEditor(DPC_vstAudioProcessor&);
@@ -12,6 +13,7 @@ public:
     void resized() override;
 
 private:
+    void timerCallback() override { repaint(); }
     DPC_vstAudioProcessor& processor;
     juce::ComboBox modeBox;
     juce::Slider clipSlider, detailSlider, mixSlider, outputSlider;
