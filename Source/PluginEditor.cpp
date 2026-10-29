@@ -83,22 +83,26 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     drawWave(true);
     drawWave(false);
 
-    // Show the live transient response that raises the clipping threshold on attacks.
+    // The three meters display measured per-band gain reduction from the DSP.
     const juce::Rectangle<float> transientView(28.0f, 204.0f, 664.0f, 34.0f);
     g.setColour(juce::Colour(0xff202226));
     g.fillRoundedRectangle(transientView, 4.0f);
-    juce::Path transientPath;
-    for (int i = 0; i < DPC_vstAudioProcessor::scopeSize; ++i)
+    const char* names[3] = { "<100 Hz", "100-1000 Hz", ">1 kHz" };
+    for (int b = 0; b < 3; ++b)
     {
-        const float value = juce::jlimit(0.0f, 1.0f, processor.getTransientScopeSample(i));
-        const float x = transientView.getX() + transientView.getWidth() * (float)i / (DPC_vstAudioProcessor::scopeSize - 1);
-        const float y = transientView.getBottom() - value * (transientView.getHeight() - 4.0f);
-        if (i == 0) transientPath.startNewSubPath(x, y); else transientPath.lineTo(x, y);
+        const float x = transientView.getX() + 6.0f + b * 219.0f;
+        const float reduction = juce::jlimit(0.0f, 1.0f, processor.getBandDuck(b));
+        g.setColour(juce::Colour(0xff363a40));
+        g.fillRoundedRectangle(x, 223.0f, 120.0f, 6.0f, 2.0f);
+        g.setColour(b == 1 ? accent : juce::Colour(0xff70c7a0));
+        g.fillRoundedRectangle(x, 223.0f, 120.0f * reduction, 6.0f, 2.0f);
+        g.setFont(10.0f);
+        g.drawText(juce::String(names[b]) + "  -" + juce::String(reduction * 100.0f, 0) + "%",
+                   juce::roundToInt(x + 123.0f), 217, 92, 16, juce::Justification::left);
     }
-    g.setColour(juce::Colour(0xff70c7a0));
-    g.strokePath(transientPath, juce::PathStrokeType(1.5f));
+    g.setColour(juce::Colour(0xff9ba1aa));
     g.setFont(10.0f);
-    g.drawText("ATTACK PRESERVATION  /  LIVE RESPONSE", 36, 206, 300, 14, juce::Justification::left);
+    g.drawText("SPECTRAL TRANSIENT FOLDBACK  /  LIVE BAND ATTENUATION", 36, 205, 400, 14, juce::Justification::left);
 
     g.setFont(11.0f);
     g.setColour(juce::Colour(0xff9ba1aa));
@@ -119,7 +123,7 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
                30, metricsY + 24, 260, 22, juce::Justification::left);
     g.setFont(11.0f);
     g.setColour(juce::Colour(0xff777b82));
-    g.drawText("Grey = input  |  Amber = output  |  Green = transient response (raises threshold; not gain reduction)",
+    g.drawText("Grey = input  |  Amber = output  |  Green / amber = actual per-band transient attenuation",
                30, metricsY + 48, 650, 18, juce::Justification::left);
 }
 
