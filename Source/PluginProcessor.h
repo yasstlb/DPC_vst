@@ -35,6 +35,7 @@ public:
     static constexpr int scopeSize = 128;
     float getInputScopeSample(int i) const { return inputScope[(size_t)i].load(std::memory_order_relaxed); }
     float getOutputScopeSample(int i) const { return outputScope[(size_t)i].load(std::memory_order_relaxed); }
+    float getTransientScopeSample(int i) const { return transientScope[(size_t)i].load(std::memory_order_relaxed); }
     float getInputPeak() const { return inputPeak.load(std::memory_order_relaxed); }
     float getOutputPeak() const { return outputPeak.load(std::memory_order_relaxed); }
     float getClipActivity() const { return clipActivity.load(std::memory_order_relaxed); }
@@ -64,6 +65,7 @@ private:
     // Lock-free telemetry for the editor. Audio thread is the sole writer.
     std::array<std::atomic<float>, scopeSize> inputScope {};
     std::array<std::atomic<float>, scopeSize> outputScope {};
+    std::array<std::atomic<float>, scopeSize> transientScope {};
     std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f };
     std::atomic<float> clipActivity { 0.0f }, transientActivity { 0.0f };
 
