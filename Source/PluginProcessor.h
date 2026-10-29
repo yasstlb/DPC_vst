@@ -33,6 +33,11 @@ public:
     juce::AudioProcessorValueTreeState parameters;
 
     static constexpr int scopeSize = 128;
+    static constexpr int fftSize = 2048;
+    int getSpectrumWritePosition() const { return spectrumPublished.load(std::memory_order_acquire); }
+    float getSpectrumInput(int index) const { return spectrumInput[(size_t)index].load(std::memory_order_relaxed); }
+    float getSpectrumOutput(int index) const { return spectrumOutput[(size_t)index].load(std::memory_order_relaxed); }
+    double getSpectrumSampleRate() const { return spectrumSampleRate.load(std::memory_order_relaxed); }
     float getInputScopeSample(int i) const { return inputScope[(size_t)i].load(std::memory_order_relaxed); }
     float getOutputScopeSample(int i) const { return outputScope[(size_t)i].load(std::memory_order_relaxed); }
     float getTransientScopeSample(int i) const { return transientScope[(size_t)i].load(std::memory_order_relaxed); }
@@ -68,6 +73,12 @@ private:
     float slowAttackCoeff = 0.0f;
     float slowReleaseCoeff = 0.0f;
 
+    // Continuous audio capture for UI-thread FFT; no FFT work on audio thread.
+    std::array<std::atomic<float>, fftSize> spectrumInput {};
+    std::array<std::atomic<float>, fftSize> spectrumOutput {};
+    std::atomic<int> spectrumPublished { 0 };
+    std::atomic<double> spectrumSampleRate { 48000.0 };
+    int spectrumWriter = 0;
     // Lock-free telemetry for the editor. Audio thread is the sole writer.
     std::array<std::atomic<float>, scopeSize> inputScope {};
     std::array<std::atomic<float>, scopeSize> outputScope {};
