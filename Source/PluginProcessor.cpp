@@ -30,6 +30,11 @@ juce::AudioProcessorValueTreeState::ParameterLayout DPC_vstAudioProcessor::creat
 void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     const bool stereo = getTotalNumInputChannels() == 2;
+    spectrumWriter = 0;
+    spectrumPublished.store(0, std::memory_order_relaxed);
+    spectrumSampleRate.store(sampleRate, std::memory_order_relaxed);
+    for (auto& v : spectrumInput) v.store(0.0f, std::memory_order_relaxed);
+    for (auto& v : spectrumOutput) v.store(0.0f, std::memory_order_relaxed);
 
     outputGain.reset(sampleRate, 0.02);
     outputGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(
@@ -319,6 +324,22 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         sample /= static_cast<float>(juce::jmax(1, channels));
         outputScope[(size_t)bin].store(sample, std::memory_order_relaxed);
     }
+    // Publish a rolling pair of pre/post samples for the spectral overlay.
+    // Both taps use the host rate; post tap is after wet mix and output gain.
+    for (int i = 0; i < samples; ++i)
+    {
+        float in = 0.0f, out = 0.0f;
+        for (int ch = 0; ch < channels; ++ch)
+        {
+            in += dryBuffer.getSample(ch, i);
+            out += buffer.getSample(ch, i);
+        }
+        const float invChannels = 1.0f / static_cast<float>(juce::jmax(1, channels));
+        spectrumInput[(size_t)spectrumWriter].store(in * invChannels, std::memory_order_relaxed);
+        spectrumOutput[(size_t)spectrumWriter].store(out * invChannels, std::memory_order_relaxed);
+        spectrumWriter = (spectrumWriter + 1) % fftSize;
+    }
+    spectrumPublished.store(spectrumWriter, std::memory_order_release);
     for (int b = 0; b < 3; ++b)
         bandDuck[(size_t)b].store(blockBandDuck[b], std::memory_order_relaxed);
     inputPeak.store(blockInputPeak, std::memory_order_relaxed);
