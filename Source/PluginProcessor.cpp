@@ -101,16 +101,27 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     const float ironNorm = std::tanh(1.08f);
     const float heatNorm = std::tanh(1.8f);
     float blockInputPeak = 0.0f, blockOutputPeak = 0.0f, blockClipActivity = 0.0f, blockTransientActivity = 0.0f;
-    const int scopeStride = juce::jmax(1, samples / scopeSize);
-    int scopeWrite = 0;
-    for (int i = 0; i < samples && scopeWrite < scopeSize; i += scopeStride)
+    // Resample each host block to a fixed-width scope, including short blocks.
+    for (int bin = 0; bin < scopeSize; ++bin)
     {
+        const int begin = bin * samples / scopeSize;
+        const int end = juce::jmax(begin + 1, (bin + 1) * samples / scopeSize);
+        float peak = 0.0f;
+        for (int i = begin; i < juce::jmin(end, samples); ++i)
+        {
+            float sample = 0.0f;
+            for (int ch = 0; ch < channels; ++ch) sample += buffer.getSample(ch, i);
+            sample /= static_cast<float>(juce::jmax(1, channels));
+            peak = juce::jmax(peak, std::abs(sample));
+        }
+        const int center = juce::jlimit(0, samples - 1, (begin + end) / 2);
         float sample = 0.0f;
-        for (int ch = 0; ch < channels; ++ch) sample += buffer.getSample(ch, i);
+        for (int ch = 0; ch < channels; ++ch) sample += buffer.getSample(ch, center);
         sample /= static_cast<float>(juce::jmax(1, channels));
-        inputScope[(size_t)scopeWrite++].store(sample, std::memory_order_relaxed);
-        blockInputPeak = juce::jmax(blockInputPeak, std::abs(sample));
+        inputScope[(size_t)bin].store(sample, std::memory_order_relaxed);
+        blockInputPeak = juce::jmax(blockInputPeak, peak);
     }
+    for (auto& value : transientScope) value.store(0.0f, std::memory_order_relaxed);
 
     clipThreshold.setTargetValue(thresholdTarget);
     wetMix.setTargetValue(mixTarget);
@@ -143,7 +154,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         return juce::jlimit(-1.0f, 1.0f, y) * safeThreshold;
     };
 
-    const auto getTransientThreshold = [this, detail, &blockTransientActivity](float linkedLevel, float baseThreshold)
+    int transientScopeBin = 0;\n    const auto getTransientThreshold = [this, detail, &blockTransientActivity, &transientScopeBin](float linkedLevel, float baseThreshold)
     {
         const float fastCoeff = linkedLevel > fastEnvelope ? fastAttackCoeff : fastReleaseCoeff;
         const float slowCoeff = linkedLevel > slowEnvelope ? slowAttackCoeff : slowReleaseCoeff;
@@ -154,6 +165,8 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
             (fastEnvelope - slowEnvelope) / (fastEnvelope + 1.0e-5f));
         // Cap the lift at +6 dB rather than tripling the threshold at full DETAIL.
         blockTransientActivity = juce::jmax(blockTransientActivity, transient);
+        const int bin = juce::jmin(scopeSize - 1, transientScopeBin++ * scopeSize / juce::jmax(1, samples * (getTotalNumInputChannels() == 2 ? 4 : 1)));
+        transientScope[(size_t)bin].store(transient, std::memory_order_relaxed);
         const float thresholdLift = 1.0f + detail * transient;
         return baseThreshold * thresholdLift;
     };
@@ -239,13 +252,13 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     }
 
     // Store post-processing waveform samples for the editor without locks.
-    scopeWrite = 0;
-    for (int i = 0; i < samples && scopeWrite < scopeSize; i += scopeStride)
+    for (int bin = 0; bin < scopeSize; ++bin)
     {
+        const int sampleIndex = juce::jlimit(0, samples - 1, (bin * samples + samples / 2) / scopeSize);
         float sample = 0.0f;
-        for (int ch = 0; ch < channels; ++ch) sample += buffer.getSample(ch, i);
+        for (int ch = 0; ch < channels; ++ch) sample += buffer.getSample(ch, sampleIndex);
         sample /= static_cast<float>(juce::jmax(1, channels));
-        outputScope[(size_t)scopeWrite++].store(sample, std::memory_order_relaxed);
+        outputScope[(size_t)bin].store(sample, std::memory_order_relaxed);
     }
     inputPeak.store(blockInputPeak, std::memory_order_relaxed);
     outputPeak.store(blockOutputPeak, std::memory_order_relaxed);
