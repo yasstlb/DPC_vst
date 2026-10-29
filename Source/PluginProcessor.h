@@ -1,6 +1,8 @@
 #pragma once
 
 #include <JuceHeader.h>
+#include <array>
+#include <atomic>
 
 class DPC_vstAudioProcessor final : public juce::AudioProcessor
 {
@@ -30,6 +32,14 @@ public:
 
     juce::AudioProcessorValueTreeState parameters;
 
+    static constexpr int scopeSize = 128;
+    float getInputScopeSample(int i) const { return inputScope[(size_t)i].load(std::memory_order_relaxed); }
+    float getOutputScopeSample(int i) const { return outputScope[(size_t)i].load(std::memory_order_relaxed); }
+    float getInputPeak() const { return inputPeak.load(std::memory_order_relaxed); }
+    float getOutputPeak() const { return outputPeak.load(std::memory_order_relaxed); }
+    float getClipActivity() const { return clipActivity.load(std::memory_order_relaxed); }
+    float getTransientActivity() const { return transientActivity.load(std::memory_order_relaxed); }
+
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> outputGain;
@@ -41,10 +51,8 @@ private:
     int oversamplingLatency = 0;
     juce::AudioBuffer<float> dryBuffer;
 
-    // One peak-linked detector keeps transient threshold lift identical across stereo.
     float fastEnvelope = 0.0f;
     float slowEnvelope = 0.0f;
-    // Per-channel DC blockers contain the small bias introduced by IRON asymmetry.
     float dcInput[2] = { 0.0f, 0.0f };
     float dcOutput[2] = { 0.0f, 0.0f };
     float dcBlockerCoeff = 0.0f;
@@ -52,6 +60,12 @@ private:
     float fastReleaseCoeff = 0.0f;
     float slowAttackCoeff = 0.0f;
     float slowReleaseCoeff = 0.0f;
+
+    // Lock-free telemetry for the editor. Audio thread is the sole writer.
+    std::array<std::atomic<float>, scopeSize> inputScope {};
+    std::array<std::atomic<float>, scopeSize> outputScope {};
+    std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f };
+    std::atomic<float> clipActivity { 0.0f }, transientActivity { 0.0f };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DPC_vstAudioProcessor)
 };
