@@ -41,9 +41,13 @@ private:
     int oversamplingLatency = 0;
     juce::AudioBuffer<float> dryBuffer;
 
-    // Independent envelope followers per channel drive transient-aware threshold lift.
-    float fastEnvelope[2] = { 0.0f, 0.0f };
-    float slowEnvelope[2] = { 0.0f, 0.0f };
+    // One peak-linked detector keeps transient threshold lift identical across stereo.
+    float fastEnvelope = 0.0f;
+    float slowEnvelope = 0.0f;
+    // Per-channel DC blockers contain the small bias introduced by IRON asymmetry.
+    float dcInput[2] = { 0.0f, 0.0f };
+    float dcOutput[2] = { 0.0f, 0.0f };
+    float dcBlockerCoeff = 0.0f;
     float fastAttackCoeff = 0.0f;
     float fastReleaseCoeff = 0.0f;
     float slowAttackCoeff = 0.0f;
