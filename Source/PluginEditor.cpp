@@ -57,95 +57,73 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     g.fillRoundedRectangle(24.0f, 76.0f, 672.0f, 2.0f, 1.0f);
     g.setColour(juce::Colour(0xff777b82));
     g.setFont(12.0f);
-    g.drawText("CLIPPER  /  LIVE SPECTRAL RESPONSE", 26, 44, 400, 20, juce::Justification::left);
+    g.drawText("CLIPPER  /  LIVE SPECTRAL REDUCTION", 26, 44, 400, 20, juce::Justification::left);
 
+    // One continuous spectral reduction curve. 0 dB = no attenuation.
+    // The FFT ratio is measured, never synthesized from knob positions.
     const juce::Rectangle<float> graph(32.0f, 94.0f, 656.0f, 210.0f);
     g.setColour(juce::Colour(0xff101114));
     g.fillRoundedRectangle(graph, 7.0f);
-
-    // Log-frequency FFT display, 20 Hz to Nyquist (maximum 20 kHz).
-    const float sr = static_cast<float>(processor.getSpectrumSampleRate());
-    const float topFrequency = juce::jmin(20000.0f, sr * 0.5f);
-    const auto frequencyToX = [&](float frequency)
+    const float sampleRate = static_cast<float>(processor.getSpectrumSampleRate());
+    const float maxHz = juce::jmax(21.0f, juce::jmin(20000.0f, sampleRate * 0.5f));
+    const auto freqX = [&](float hz)
     {
-        return graph.getX() + graph.getWidth() *
-            (std::log(frequency / 20.0f) / std::log(topFrequency / 20.0f));
+        return graph.getX() + graph.getWidth() * std::log(hz / 20.0f) / std::log(maxHz / 20.0f);
     };
-    g.setFont(10.0f);
-    for (float freq : { 20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f, 20000.0f })
+    for (float hz : { 20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f, 20000.0f })
     {
-        if (freq > topFrequency) continue;
-        const float x = frequencyToX(freq);
-        g.setColour(juce::Colour(0xff303238));
+        if (hz > maxHz) continue;
+        const float x = freqX(hz);
+        g.setColour(juce::Colour(0xff30343a));
         g.drawVerticalLine(juce::roundToInt(x), graph.getY(), graph.getBottom());
-        g.setColour(juce::Colour(0xff8b9099));
-        g.drawText(freq >= 1000.0f ? juce::String(freq / 1000.0f, 0) + "k" : juce::String(freq, 0),
-                   juce::roundToInt(x - 16.0f), 308, 34, 14, juce::Justification::centred);
+        g.setColour(juce::Colour(0xff9aa0a8));
+        g.setFont(10.0f);
+        g.drawText(hz >= 1000.0f ? juce::String(hz / 1000.0f, 0) + "k" : juce::String(hz, 0),
+                   juce::roundToInt(x - 18.0f), 308, 36, 14, juce::Justification::centred);
     }
-    for (int db = -72; db <= 0; db += 12)
+    for (int reduction = 0; reduction <= 24; reduction += 6)
     {
-        const float y = graph.getY() + graph.getHeight() * (-static_cast<float>(db) / 72.0f);
-        g.setColour(juce::Colour(0xff303238));
+        const float y = graph.getY() + graph.getHeight() * static_cast<float>(reduction) / 24.0f;
+        g.setColour(reduction == 0 ? juce::Colour(0xff8e724d) : juce::Colour(0xff30343a));
         g.drawHorizontalLine(juce::roundToInt(y), graph.getX(), graph.getRight());
-        g.setColour(juce::Colour(0xff8b9099));
-        g.drawText(juce::String(db), 37, juce::roundToInt(y) + 1, 30, 12, juce::Justification::left);
+        g.setColour(juce::Colour(0xff9aa0a8));
+        g.drawText(reduction == 0 ? "0 dB" : "-" + juce::String(reduction),
+                   36, juce::roundToInt(y) + 2, 42, 13, juce::Justification::left);
     }
-    const float midStart = frequencyToX(100.0f);
-    const float midEnd = frequencyToX(1000.0f);
-    g.setColour(juce::Colour(0x174cacc7));
-    g.fillRect(midStart, graph.getY(), midEnd - midStart, graph.getHeight());
-
-    const auto dbToY = [&](float db)
+    g.setColour(juce::Colour(0x154b9bb8));
+    g.fillRect(freqX(100.0f), graph.getY(), freqX(1000.0f) - freqX(100.0f), graph.getHeight());
+    juce::Path reductionCurve, reductionArea;
+    for (int i = 0; i < DPC_vstAudioProcessor::scopeSize; ++i)
     {
-        return graph.getY() + graph.getHeight() *
-            (1.0f - (juce::jlimit(-72.0f, 0.0f, db) + 72.0f) / 72.0f);
-    };
-    juce::Path inputLine, outputLine, inputFill, reductionFill;
-    const int points = DPC_vstAudioProcessor::scopeSize;
-    for (int i = 0; i < points; ++i)
-    {
-        const float frequency = 20.0f * std::pow(topFrequency / 20.0f,
-            static_cast<float>(i) / static_cast<float>(points - 1));
-        const float x = frequencyToX(frequency);
-        const float inputY = dbToY(inputSpectrum[(size_t)i]);
-        const float outputY = dbToY(outputSpectrum[(size_t)i]);
+        const float fraction = static_cast<float>(i) / static_cast<float>(DPC_vstAudioProcessor::scopeSize - 1);
+        const float x = graph.getX() + fraction * graph.getWidth();
+        // Negative differences indicate attenuation. Increases from harmonics
+        // or output gain are displayed at 0 dB rather than as fake reduction.
+        const float attenuation = juce::jlimit(0.0f, 24.0f,
+            inputSpectrum[(size_t)i] - outputSpectrum[(size_t)i]);
+        const float y = graph.getY() + graph.getHeight() * attenuation / 24.0f;
         if (i == 0)
         {
-            inputLine.startNewSubPath(x, inputY);
-            outputLine.startNewSubPath(x, outputY);
-            inputFill.startNewSubPath(x, graph.getBottom());
+            reductionCurve.startNewSubPath(x, y);
+            reductionArea.startNewSubPath(x, graph.getY());
         }
-        else
-        {
-            inputLine.lineTo(x, inputY);
-            outputLine.lineTo(x, outputY);
-        }
-        inputFill.lineTo(x, inputY);
-        // Orange shading only where the actual processed spectrum is lower.
-        if (outputY > inputY + 0.25f)
-        {
-            g.setColour(juce::Colour(0x44ef8e36));
-            g.drawVerticalLine(juce::roundToInt(x), inputY, outputY);
-        }
+        else reductionCurve.lineTo(x, y);
+        reductionArea.lineTo(x, y);
     }
-    inputFill.lineTo(graph.getRight(), graph.getBottom());
-    inputFill.closeSubPath();
-    g.setColour(juce::Colour(0x397e8998));
-    g.fillPath(inputFill);
-    g.setColour(juce::Colour(0xff8793a3));
-    g.strokePath(inputLine, juce::PathStrokeType(1.3f));
+    reductionArea.lineTo(graph.getRight(), graph.getY());
+    reductionArea.closeSubPath();
+    g.setColour(juce::Colour(0x55e0a14b));
+    g.fillPath(reductionArea);
     g.setColour(accent);
-    g.strokePath(outputLine, juce::PathStrokeType(2.1f));
-    g.setFont(11.0f);
-    g.setColour(juce::Colour(0xffa1a8b2));
-    g.drawText("INPUT", 40, 98, 60, 16, juce::Justification::left);
-    g.setColour(accent);
-    g.drawText("PROCESSED", 104, 98, 110, 16, juce::Justification::left);
-    g.setColour(juce::Colour(0xffb8b8b8));
-    g.drawText("SPECTRAL REDUCTION  /  REAL AUDIO FFT", 36, 330, 360, 20, juce::Justification::left);
-    g.setColour(juce::Colour(0xff858a92));
+    g.strokePath(reductionCurve, juce::PathStrokeType(2.2f));
+    g.setColour(juce::Colour(0xffd2d6dc));
+    g.setFont(12.0f);
+    g.drawText("LIVE SPECTRAL ATTENUATION", 42, 101, 290, 20, juce::Justification::left);
     g.setFont(10.0f);
-    g.drawText("Orange shading = measured reduction; spectral boost and harmonics remain visible.",
+    g.setColour(juce::Colour(0xff949ba5));
+    g.drawText("0 dB = no reduction  |  Downward = more reduction  |  2048-point FFT",
+               36, 330, 640, 18, juce::Justification::left);
+    g.drawText("CLIP + DETAIL affect the measured response; output gain and mix also affect the reading.",
                36, 351, 640, 18, juce::Justification::left);
 }
 
