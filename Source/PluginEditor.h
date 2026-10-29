@@ -13,7 +13,12 @@ public:
     void resized() override;
 
 private:
-    void timerCallback() override { repaint(); }
+    void timerCallback() override;
+    void updateSpectrum();
+    juce::dsp::FFT fft { 11 };
+    std::array<float, DPC_vstAudioProcessor::fftSize * 2> fftInput {};
+    std::array<float, DPC_vstAudioProcessor::fftSize * 2> fftOutput {};
+    std::array<float, DPC_vstAudioProcessor::scopeSize> inputSpectrum {}, outputSpectrum {};
     DPC_vstAudioProcessor& processor;
     juce::ComboBox modeBox;
     juce::Slider clipSlider, detailSlider, mixSlider, outputSlider;
