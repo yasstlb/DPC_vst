@@ -36,6 +36,7 @@ public:
     float getInputScopeSample(int i) const { return inputScope[(size_t)i].load(std::memory_order_relaxed); }
     float getOutputScopeSample(int i) const { return outputScope[(size_t)i].load(std::memory_order_relaxed); }
     float getTransientScopeSample(int i) const { return transientScope[(size_t)i].load(std::memory_order_relaxed); }
+    float getBandDuck(int band) const { return bandDuck[(size_t)juce::jlimit(0, 2, band)].load(std::memory_order_relaxed); }
     float getInputPeak() const { return inputPeak.load(std::memory_order_relaxed); }
     float getOutputPeak() const { return outputPeak.load(std::memory_order_relaxed); }
     float getClipActivity() const { return clipActivity.load(std::memory_order_relaxed); }
@@ -52,6 +53,11 @@ private:
     int oversamplingLatency = 0;
     juce::AudioBuffer<float> dryBuffer;
 
+    // Complementary one-pole split: <100 Hz, 100-1000 Hz, >1000 Hz.
+    float splitState[2][2] {};
+    float bandFast[3] {}, bandSlow[3] {};
+    float splitCoeff[2] {};
+    std::array<std::atomic<float>, 3> bandDuck {};
     float fastEnvelope = 0.0f;
     float slowEnvelope = 0.0f;
     float dcInput[2] = { 0.0f, 0.0f };
