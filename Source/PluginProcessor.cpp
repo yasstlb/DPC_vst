@@ -54,41 +54,48 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     const float detail = parameters.getRawParameterValue("DETAIL")->load();
     const float mix = parameters.getRawParameterValue("MIX")->load();
     const float outputDb = parameters.getRawParameterValue("OUTPUT")->load();
+
+    // CLIP is the actual output ceiling. Normalise before the curve so each
+    // mode uses the same nominal ceiling, rather than clipping at 0 dBFS.
     const float threshold = juce::Decibels::decibelsToGain(clipDb);
+    const float ironNorm = std::tanh(1.08f);
+    const float heatNorm = std::tanh(1.8f);
     outputGain.setTargetValue(juce::Decibels::decibelsToGain(outputDb));
 
     for (int ch = channels; ch < getTotalNumOutputChannels(); ++ch)
         buffer.clear(ch, 0, samples);
 
-    for (int ch = 0; ch < channels; ++ch)
+    // Advance the output smoother once per frame, keeping stereo channels linked.
+    for (int i = 0; i < samples; ++i)
     {
-        auto* data = buffer.getWritePointer(ch);
-        for (int i = 0; i < samples; ++i)
+        const float gain = outputGain.getNextValue();
+        for (int ch = 0; ch < channels; ++ch)
         {
+            auto* data = buffer.getWritePointer(ch);
             const float dry = data[i];
-            const float drive = std::max(1.0f, 1.0f / std::max(threshold, 0.01f));
-            float driven = dry * drive;
-            float wet = driven;
+            const float driven = dry / juce::jmax(threshold, 1.0e-6f);
+            float normalisedWet = 0.0f;
 
-            if (mode == 0)
+            if (mode == 0) // CORE: hard, symmetric ceiling
             {
-                wet = juce::jlimit(-1.0f, 1.0f, driven);
+                normalisedWet = juce::jlimit(-1.0f, 1.0f, driven);
             }
-            else if (mode == 1)
+            else if (mode == 1) // IRON: mild asymmetric saturation
             {
                 const float asym = driven + 0.08f * driven * driven;
-                wet = std::tanh(asym) * 0.9f;
+                normalisedWet = std::tanh(asym) / ironNorm;
             }
-            else
+            else // HEAT: denser, more aggressive soft saturation
             {
-                wet = std::tanh(driven * 1.8f);
+                normalisedWet = std::tanh(driven * 1.8f) / heatNorm;
             }
 
-            // DETAIL blends the clipped signal with a transient-preserving soft knee.
-            const float knee = std::tanh(driven * (1.0f + 3.0f * detail))
-                             / std::max(0.001f, std::tanh(1.0f + 3.0f * detail));
-            wet = juce::jlimit(-1.0f, 1.0f, wet * (1.0f - detail) + knee * detail);
-            const float gain = outputGain.getNextValue();
+            // DETAIL currently crossfades from the selected curve toward a
+            // softer curve. It is a tonal control, not yet a measured transient
+            // reconstruction algorithm; see README limitations.
+            const float soft = std::tanh(driven * 0.7f) / std::tanh(0.7f);
+            normalisedWet = normalisedWet * (1.0f - detail) + soft * detail;
+            const float wet = juce::jlimit(-1.0f, 1.0f, normalisedWet) * threshold;
             data[i] = (dry + (wet - dry) * mix) * gain;
         }
     }
