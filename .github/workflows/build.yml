@@ -21,3 +21,11 @@ jobs:
 
       - name: Build VST3
         run: cmake --build build --config Release --target DPC_vst_VST3
+
+      - name: Upload VST3 build
+        uses: actions/upload-artifact@v4
+        with:
+          name: DPC-vst3-windows
+          path: build/DPC_vst_artefacts/Release/VST3/DPC.vst3
+          if-no-files-found: error
+          retention-days: 14
