@@ -98,7 +98,18 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         parameters.getRawParameterValue("CLIP")->load());
     const float mixTarget = parameters.getRawParameterValue("MIX")->load();
     const float ironNorm = std::tanh(1.08f);
-    const float heatNorm = std::tanh(1.8f);\n    float blockInputPeak = 0.0f, blockOutputPeak = 0.0f, blockClipActivity = 0.0f, blockTransientActivity = 0.0f;\n    const int scopeStride = juce::jmax(1, samples / scopeSize);\n    int scopeWrite = 0;\n    for (int i = 0; i < samples && scopeWrite < scopeSize; i += scopeStride)\n    {\n        float sample = 0.0f;\n        for (int ch = 0; ch < channels; ++ch) sample += buffer.getSample(ch, i);\n        sample /= static_cast<float>(juce::jmax(1, channels));\n        inputScope[(size_t)scopeWrite++].store(sample, std::memory_order_relaxed);\n        blockInputPeak = juce::jmax(blockInputPeak, std::abs(sample));\n    }
+    const float heatNorm = std::tanh(1.8f);
+    float blockInputPeak = 0.0f, blockOutputPeak = 0.0f, blockClipActivity = 0.0f, blockTransientActivity = 0.0f;
+    const int scopeStride = juce::jmax(1, samples / scopeSize);
+    int scopeWrite = 0;
+    for (int i = 0; i < samples && scopeWrite < scopeSize; i += scopeStride)
+    {
+        float sample = 0.0f;
+        for (int ch = 0; ch < channels; ++ch) sample += buffer.getSample(ch, i);
+        sample /= static_cast<float>(juce::jmax(1, channels));
+        inputScope[(size_t)scopeWrite++].store(sample, std::memory_order_relaxed);
+        blockInputPeak = juce::jmax(blockInputPeak, std::abs(sample));
+    }
 
     clipThreshold.setTargetValue(thresholdTarget);
     wetMix.setTargetValue(mixTarget);
@@ -165,7 +176,9 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
             const float linkedLevel = juce::jmax(
                 std::abs(wetBlock.getSample(0, i)),
                 std::abs(wetBlock.getSample(1, i)));
-            const float transientAwareThreshold = getTransientThreshold(linkedLevel, threshold);\n            if (linkedLevel > transientAwareThreshold) blockClipActivity = juce::jmax(blockClipActivity, 1.0f);\n            if (linkedLevel > transientAwareThreshold) blockClipActivity = juce::jmax(blockClipActivity, 1.0f);
+            const float transientAwareThreshold = getTransientThreshold(linkedLevel, threshold);
+            if (linkedLevel > transientAwareThreshold) blockClipActivity = juce::jmax(blockClipActivity, 1.0f);
+            if (linkedLevel > transientAwareThreshold) blockClipActivity = juce::jmax(blockClipActivity, 1.0f);
             for (size_t ch = 0; ch < wetBlock.getNumChannels(); ++ch)
             {
                 auto* data = wetBlock.getChannelPointer(ch);
@@ -216,9 +229,25 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
                 mixed = drySample + (wetSample - drySample) * wet;
             }
 
-            const float outputSample = mixed * gain;\n            buffer.setSample(ch, i, outputSample);\n            blockOutputPeak = juce::jmax(blockOutputPeak, std::abs(outputSample));\n        }\n    }\n\n    // Store post-processing waveform samples for the editor without locks.\n    scopeWrite = 0;\n    for (int i = 0; i < samples && scopeWrite < scopeSize; i += scopeStride)\n    {\n        float sample = 0.0f;\n        for (int ch = 0; ch < channels; ++ch) sample += buffer.getSample(ch, i);\n        sample /= static_cast<float>(juce::jmax(1, channels));\n        outputScope[(size_t)scopeWrite++].store(sample, std::memory_order_relaxed);\n    }\n    inputPeak.store(blockInputPeak, std::memory_order_relaxed);\n    outputPeak.store(blockOutputPeak, std::memory_order_relaxed);\n    clipActivity.store(blockClipActivity, std::memory_order_relaxed);\n    transientActivity.store(blockTransientActivity, std::memory_order_relaxed);
+            const float outputSample = mixed * gain;
+            buffer.setSample(ch, i, outputSample);
+            blockOutputPeak = juce::jmax(blockOutputPeak, std::abs(outputSample));
         }
     }
+
+    // Store post-processing waveform samples for the editor without locks.
+    scopeWrite = 0;
+    for (int i = 0; i < samples && scopeWrite < scopeSize; i += scopeStride)
+    {
+        float sample = 0.0f;
+        for (int ch = 0; ch < channels; ++ch) sample += buffer.getSample(ch, i);
+        sample /= static_cast<float>(juce::jmax(1, channels));
+        outputScope[(size_t)scopeWrite++].store(sample, std::memory_order_relaxed);
+    }
+    inputPeak.store(blockInputPeak, std::memory_order_relaxed);
+    outputPeak.store(blockOutputPeak, std::memory_order_relaxed);
+    clipActivity.store(blockClipActivity, std::memory_order_relaxed);
+    transientActivity.store(blockTransientActivity, std::memory_order_relaxed);
 }
 
 void DPC_vstAudioProcessor::getStateInformation(juce::MemoryBlock& destData)
