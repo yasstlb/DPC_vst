@@ -57,32 +57,54 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     g.setFont(12.0f);
     g.drawText("CLIPPER  /  LIVE DSP VIEW", 26, 44, 400, 20, juce::Justification::left);
 
-    const juce::Rectangle<float> scope(28.0f, 92.0f, 664.0f, 104.0f);
-    g.setColour(juce::Colour(0xff17191c));
-    g.fillRoundedRectangle(scope, 7.0f);
-    g.setColour(juce::Colour(0xff34383d));
-    for (int i = 1; i < 4; ++i)
-        g.drawHorizontalLine(juce::roundToInt(scope.getY() + scope.getHeight() * i / 4.0f), scope.getX(), scope.getRight());
-    g.drawHorizontalLine(juce::roundToInt(scope.getCentreY()), scope.getX(), scope.getRight());
+    // Enlarged clip-history view: grey input and amber processed signal.
+    // This is a block snapshot, not a scrolling history or FFT spectrum.
+    const juce::Rectangle<float> scope(28.0f, 88.0f, 664.0f, 108.0f);
+    g.setColour(juce::Colour(0xff101114));
+    g.fillRoundedRectangle(scope, 6.0f);
+    const float clipDb = processor.parameters.getRawParameterValue("CLIP")->load();
+    const float threshold = juce::Decibels::decibelsToGain(-clipDb);
+    const float scale = scope.getHeight() * 0.44f;
+    const float centre = scope.getCentreY();
+    const float topLimit = centre - threshold * scale;
+    const float bottomLimit = centre + threshold * scale;
+    g.setColour(juce::Colour(0xff30343a));
+    g.drawHorizontalLine(juce::roundToInt(centre), scope.getX(), scope.getRight());
+    g.setColour(juce::Colour(0x44e0a14b));
+    g.fillRect(scope.getX(), topLimit - 1.0f, scope.getWidth(), 2.0f);
+    g.fillRect(scope.getX(), bottomLimit - 1.0f, scope.getWidth(), 2.0f);
 
-    auto drawWave = [&](bool input)
+    juce::Path inputFill, outputLine;
+    inputFill.startNewSubPath(scope.getX(), centre);
+    for (int i = 0; i < DPC_vstAudioProcessor::scopeSize; ++i)
     {
-        juce::Path path;
-        const float mid = scope.getCentreY();
-        const float scale = scope.getHeight() * 0.43f;
-        for (int i = 0; i < DPC_vstAudioProcessor::scopeSize; ++i)
+        const float x = scope.getX() + scope.getWidth() * static_cast<float>(i)
+            / static_cast<float>(DPC_vstAudioProcessor::scopeSize - 1);
+        const float input = juce::jlimit(-1.0f, 1.0f, processor.getInputScopeSample(i));
+        const float output = juce::jlimit(-1.0f, 1.0f, processor.getOutputScopeSample(i));
+        const float inY = centre - input * scale;
+        const float outY = centre - output * scale;
+        inputFill.lineTo(x, inY);
+        if (i == 0) outputLine.startNewSubPath(x, outY);
+        else outputLine.lineTo(x, outY);
+        // Highlight only input excursions beyond the actual base clip threshold.
+        if (std::abs(input) > threshold)
         {
-            const float value = input ? processor.getInputScopeSample(i) : processor.getOutputScopeSample(i);
-            const float x = scope.getX() + scope.getWidth() * (float)i / (DPC_vstAudioProcessor::scopeSize - 1);
-            const float y = mid - juce::jlimit(-1.0f, 1.0f, value) * scale;
-            if (i == 0) path.startNewSubPath(x, y); else path.lineTo(x, y);
+            g.setColour(juce::Colour(0x88ff9c3d));
+            const float limitY = input > 0.0f ? topLimit : bottomLimit;
+            g.drawVerticalLine(juce::roundToInt(x), juce::jmin(inY, limitY), juce::jmax(inY, limitY));
         }
-        g.setColour(input ? juce::Colour(0xff7c8796) : accent);
-        g.strokePath(path, juce::PathStrokeType(input ? 1.2f : 1.8f));
-    };
-    drawWave(true);
-    drawWave(false);
-
+    }
+    inputFill.lineTo(scope.getRight(), centre);
+    inputFill.closeSubPath();
+    g.setColour(juce::Colour(0x667f8793));
+    g.fillPath(inputFill);
+    g.setColour(accent);
+    g.strokePath(outputLine, juce::PathStrokeType(1.7f));
+    g.setFont(10.0f);
+    g.setColour(juce::Colour(0xffffc47a));
+    g.drawText("CLIP THRESHOLD  -" + juce::String(clipDb, 1) + " dB",
+               405, 91, 275, 16, juce::Justification::right);
     // The three meters display measured per-band gain reduction from the DSP.
     const juce::Rectangle<float> transientView(28.0f, 204.0f, 664.0f, 34.0f);
     g.setColour(juce::Colour(0xff202226));
@@ -102,7 +124,7 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     }
     g.setColour(juce::Colour(0xff9ba1aa));
     g.setFont(10.0f);
-    g.drawText("SPECTRAL TRANSIENT FOLDBACK  /  LIVE BAND ATTENUATION", 36, 205, 400, 14, juce::Justification::left);
+    g.drawText("LIVE FREQUENCY-BAND DUCKING", 36, 205, 400, 14, juce::Justification::left);
 
     g.setFont(11.0f);
     g.setColour(juce::Colour(0xff9ba1aa));
@@ -123,7 +145,7 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
                30, metricsY + 24, 260, 22, juce::Justification::left);
     g.setFont(11.0f);
     g.setColour(juce::Colour(0xff777b82));
-    g.drawText("Grey = input  |  Amber = output  |  Green / amber = actual per-band transient attenuation",
+    g.drawText("Grey: input  |  Amber: output  |  Orange spikes: above base threshold  |  Bars: band ducking",
                30, metricsY + 48, 650, 18, juce::Justification::left);
 }
 
