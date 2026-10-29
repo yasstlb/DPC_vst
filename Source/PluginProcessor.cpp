@@ -33,7 +33,7 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     outputGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(
         parameters.getRawParameterValue("OUTPUT")->load()));
 
-    clipThreshold.reset(sampleRate, 0.005);
+    clipThreshold.reset(sampleRate * 4.0, 0.005);
     clipThreshold.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(
         parameters.getRawParameterValue("CLIP")->load()));
     wetMix.reset(sampleRate, 0.005);
@@ -47,6 +47,7 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     dryDelay.setMaximumDelayInSamples(8191);
     dryDelay.prepare({ sampleRate, static_cast<juce::uint32>(juce::jmax(1, samplesPerBlock)), 2 });
     dryDelay.setDelay(static_cast<float>(oversamplingLatency));
+    setLatencySamples(oversamplingLatency);
     dryDelay.reset();
 }
 
@@ -85,7 +86,8 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     for (int ch = channels; ch < getTotalNumOutputChannels(); ++ch)
         buffer.clear(ch, 0, samples);
 
-    dryBuffer.setSize(2, samples, false, false, true);
+    if (dryBuffer.getNumSamples() < samples)
+        dryBuffer.setSize(2, samples, false, false, true);
     for (int ch = 0; ch < channels; ++ch)
         dryBuffer.copyFrom(ch, 0, buffer, ch, 0, samples);
 
