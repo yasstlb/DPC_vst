@@ -27,14 +27,33 @@ juce::AudioProcessorValueTreeState::ParameterLayout DPC_vstAudioProcessor::creat
     return layout;
 }
 
-void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int)
+void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock)
 {
     outputGain.reset(sampleRate, 0.02);
     outputGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(
         parameters.getRawParameterValue("OUTPUT")->load()));
+
+    clipThreshold.reset(sampleRate, 0.005);
+    clipThreshold.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(
+        parameters.getRawParameterValue("CLIP")->load()));
+    wetMix.reset(sampleRate, 0.005);
+    wetMix.setCurrentAndTargetValue(parameters.getRawParameterValue("MIX")->load());
+
+    oversampling.initProcessing(static_cast<size_t>(juce::jmax(1, samplesPerBlock)));
+    oversampling.reset();
+    oversamplingLatency = juce::roundToInt(oversampling.getLatencyInSamples());
+
+    dryDelay.setMaximumDelayInSamples(8191);
+    dryDelay.prepare({ sampleRate, static_cast<juce::uint32>(juce::jmax(1, samplesPerBlock)), 2 });
+    dryDelay.setDelay(static_cast<float>(oversamplingLatency));
+    dryDelay.reset();
 }
 
-void DPC_vstAudioProcessor::releaseResources() {}
+void DPC_vstAudioProcessor::releaseResources()
+{
+    oversampling.reset();
+    dryDelay.reset();
+}
 
 bool DPC_vstAudioProcessor::isBusesLayoutSupported(const BusesLayout& layouts) const
 {
@@ -52,51 +71,64 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     const int mode = static_cast<int>(parameters.getRawParameterValue("MODE")->load());
     const float clipDb = parameters.getRawParameterValue("CLIP")->load();
     const float detail = parameters.getRawParameterValue("DETAIL")->load();
-    const float mix = parameters.getRawParameterValue("MIX")->load();
+    const float mixTarget = parameters.getRawParameterValue("MIX")->load();
     const float outputDb = parameters.getRawParameterValue("OUTPUT")->load();
-
-    // CLIP is the actual output ceiling. Normalise before the curve so each
-    // mode uses the same nominal ceiling, rather than clipping at 0 dBFS.
-    const float threshold = juce::Decibels::decibelsToGain(clipDb);
+    const float thresholdTarget = juce::Decibels::decibelsToGain(clipDb);
     const float ironNorm = std::tanh(1.08f);
     const float heatNorm = std::tanh(1.8f);
+
+    clipThreshold.setTargetValue(thresholdTarget);
+    wetMix.setTargetValue(mixTarget);
     outputGain.setTargetValue(juce::Decibels::decibelsToGain(outputDb));
 
     for (int ch = channels; ch < getTotalNumOutputChannels(); ++ch)
         buffer.clear(ch, 0, samples);
 
-    // Advance the output smoother once per frame, keeping stereo channels linked.
+    // Oversampling is used for stereo; mono hosts retain the same DSP curve
+    // without passing a one-channel block to the two-channel oversampler.
+    if (channels == 2)
+    {
+        auto block = juce::dsp::AudioBlock<float>(buffer);
+        auto wetBlock = oversampling.processSamplesUp(block);
+        for (size_t ch = 0; ch < wetBlock.getNumChannels(); ++ch)
+        {
+            auto* data = wetBlock.getChannelPointer(ch);
+            for (size_t i = 0; i < wetBlock.getNumSamples(); ++i)
+            {
+                const float threshold = juce::jmax(clipThreshold.getCurrentValue(), 1.0e-6f);
+                const float driven = data[i] / threshold;
+                float y = 0.0f;
+                if (mode == 0)
+                    y = juce::jlimit(-1.0f, 1.0f, driven);
+                else if (mode == 1)
+                    y = std::tanh(driven + 0.08f * driven * driven) / ironNorm;
+                else
+                    y = std::tanh(driven * 1.8f) / heatNorm;
+
+                const float detailCurve = std::tanh(driven * 0.7f) / std::tanh(0.7f);
+                y = y * (1.0f - detail) + detailCurve * detail;
+                data[i] = juce::jlimit(-1.0f, 1.0f, y) * threshold;
+                clipThreshold.getNextValue();
+            }
+        }
+        oversampling.processSamplesDown(block);
+    }
+
+    // Delay the dry path by the oversampler latency, then mix at base rate.
+    // The delay is still applied in mono mode for consistent reported latency.
     for (int i = 0; i < samples; ++i)
     {
         const float gain = outputGain.getNextValue();
+        const float wet = wetMix.getNextValue();
         for (int ch = 0; ch < channels; ++ch)
         {
-            auto* data = buffer.getWritePointer(ch);
-            const float dry = data[i];
-            const float driven = dry / juce::jmax(threshold, 1.0e-6f);
-            float normalisedWet = 0.0f;
-
-            if (mode == 0) // CORE: hard, symmetric ceiling
-            {
-                normalisedWet = juce::jlimit(-1.0f, 1.0f, driven);
-            }
-            else if (mode == 1) // IRON: mild asymmetric saturation
-            {
-                const float asym = driven + 0.08f * driven * driven;
-                normalisedWet = std::tanh(asym) / ironNorm;
-            }
-            else // HEAT: denser, more aggressive soft saturation
-            {
-                normalisedWet = std::tanh(driven * 1.8f) / heatNorm;
-            }
-
-            // DETAIL currently crossfades from the selected curve toward a
-            // softer curve. It is a tonal control, not yet a measured transient
-            // reconstruction algorithm; see README limitations.
-            const float soft = std::tanh(driven * 0.7f) / std::tanh(0.7f);
-            normalisedWet = normalisedWet * (1.0f - detail) + soft * detail;
-            const float wet = juce::jlimit(-1.0f, 1.0f, normalisedWet) * threshold;
-            data[i] = (dry + (wet - dry) * mix) * gain;
+            const float input = channels == 2 ? buffer.getSample(ch, i) : buffer.getSample(ch, i);
+            const float delayedDry = dryDelay.popSample(ch);
+            dryDelay.pushSample(ch, input);
+            const float mixed = channels == 2
+                ? (delayedDry + (input - delayedDry) * wet)
+                : input;
+            buffer.setSample(ch, i, mixed * gain);
         }
     }
 }
