@@ -39,6 +39,7 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     wetMix.reset(sampleRate, 0.005);
     wetMix.setCurrentAndTargetValue(parameters.getRawParameterValue("MIX")->load());
 
+    dryBuffer.setSize(2, juce::jmax(1, samplesPerBlock), false, false, true);
     oversampling.initProcessing(static_cast<size_t>(juce::jmax(1, samplesPerBlock)));
     oversampling.reset();
     oversamplingLatency = juce::roundToInt(oversampling.getLatencyInSamples());
@@ -84,6 +85,10 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     for (int ch = channels; ch < getTotalNumOutputChannels(); ++ch)
         buffer.clear(ch, 0, samples);
 
+    dryBuffer.setSize(2, samples, false, false, true);
+    for (int ch = 0; ch < channels; ++ch)
+        dryBuffer.copyFrom(ch, 0, buffer, ch, 0, samples);
+
     // Oversampling is used for stereo; mono hosts retain the same DSP curve
     // without passing a one-channel block to the two-channel oversampler.
     if (channels == 2)
@@ -122,12 +127,13 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         const float wet = wetMix.getNextValue();
         for (int ch = 0; ch < channels; ++ch)
         {
-            const float input = channels == 2 ? buffer.getSample(ch, i) : buffer.getSample(ch, i);
+            const float wetSample = buffer.getSample(ch, i);
+            const float drySample = dryBuffer.getSample(ch, i);
             const float delayedDry = dryDelay.popSample(ch);
-            dryDelay.pushSample(ch, input);
+            dryDelay.pushSample(ch, drySample);
             const float mixed = channels == 2
-                ? (delayedDry + (input - delayedDry) * wet)
-                : input;
+                ? (delayedDry + (wetSample - delayedDry) * wet)
+                : wetSample;
             buffer.setSample(ch, i, mixed * gain);
         }
     }
