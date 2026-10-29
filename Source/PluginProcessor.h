@@ -39,5 +39,6 @@ private:
         juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, true };
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> dryDelay { 8192 };
     int oversamplingLatency = 0;
+    juce::AudioBuffer<float> dryBuffer;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DPC_vstAudioProcessor)
 };
