@@ -57,7 +57,7 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     g.setFont(12.0f);
     g.drawText("CLIPPER  /  LIVE DSP VIEW", 26, 44, 400, 20, juce::Justification::left);
 
-    const juce::Rectangle<float> scope(28.0f, 92.0f, 664.0f, 154.0f);
+    const juce::Rectangle<float> scope(28.0f, 92.0f, 664.0f, 104.0f);
     g.setColour(juce::Colour(0xff17191c));
     g.fillRoundedRectangle(scope, 7.0f);
     g.setColour(juce::Colour(0xff34383d));
