@@ -115,6 +115,11 @@ void DPC_vstAudioProcessor::setStateInformation(const void* data, int sizeInByte
         parameters.replaceState(juce::ValueTree::fromXml(*xml));
 }
 
+juce::AudioProcessorEditor* DPC_vstAudioProcessor::createEditor()
+{
+    return new DPC_vstAudioProcessorEditor(*this);
+}
+
 juce::AudioProcessor* JUCE_CALLTYPE createPluginFilter()
 {
     return new DPC_vstAudioProcessor();
