@@ -83,7 +83,7 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     drawWave(true);
     drawWave(false);
 
-    // A separate strip plots the detector's per-sample transient score.
+    // Show the live transient response that raises the clipping threshold on attacks.
     const juce::Rectangle<float> transientView(28.0f, 204.0f, 664.0f, 34.0f);
     g.setColour(juce::Colour(0xff202226));
     g.fillRoundedRectangle(transientView, 4.0f);
@@ -98,7 +98,7 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xff70c7a0));
     g.strokePath(transientPath, juce::PathStrokeType(1.5f));
     g.setFont(10.0f);
-    g.drawText("TRANSIENT DETECTOR  /  0–100%", 36, 206, 230, 14, juce::Justification::left);
+    g.drawText("ATTACK PRESERVATION  /  LIVE RESPONSE", 36, 206, 300, 14, juce::Justification::left);
 
     g.setFont(11.0f);
     g.setColour(juce::Colour(0xff9ba1aa));
@@ -115,11 +115,11 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     g.drawText("OUT PEAK  " + juce::String(outDb, 1) + " dBFS", 205, metricsY, 180, 22, juce::Justification::left);
     g.drawText("CLIP ACTIVITY  " + juce::String(processor.getClipActivity() > 0.0f ? "ACTIVE" : "IDLE"),
                405, metricsY, 180, 22, juce::Justification::left);
-    g.drawText("TRANSIENT DETECTOR  " + juce::String(processor.getTransientActivity() * 100.0f, 0) + "%",
+    g.drawText("ATTACK RESPONSE  " + juce::String(processor.getTransientActivity() * 100.0f, 0) + "%",
                30, metricsY + 24, 260, 22, juce::Justification::left);
     g.setFont(11.0f);
     g.setColour(juce::Colour(0xff777b82));
-    g.drawText("Grey = input  |  Amber = processed output  |  Clip activity is a threshold-crossing indicator",
+    g.drawText("Grey = input  |  Amber = output  |  Green = transient response (raises threshold; not gain reduction)",
                30, metricsY + 48, 650, 18, juce::Justification::left);
 }
 
