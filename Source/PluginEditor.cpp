@@ -83,6 +83,23 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     drawWave(true);
     drawWave(false);
 
+    // A separate strip plots the detector's per-sample transient score.
+    const juce::Rectangle<float> transientView(28.0f, 204.0f, 664.0f, 34.0f);
+    g.setColour(juce::Colour(0xff202226));
+    g.fillRoundedRectangle(transientView, 4.0f);
+    juce::Path transientPath;
+    for (int i = 0; i < DPC_vstAudioProcessor::scopeSize; ++i)
+    {
+        const float value = juce::jlimit(0.0f, 1.0f, processor.getTransientScopeSample(i));
+        const float x = transientView.getX() + transientView.getWidth() * (float)i / (DPC_vstAudioProcessor::scopeSize - 1);
+        const float y = transientView.getBottom() - value * (transientView.getHeight() - 4.0f);
+        if (i == 0) transientPath.startNewSubPath(x, y); else transientPath.lineTo(x, y);
+    }
+    g.setColour(juce::Colour(0xff70c7a0));
+    g.strokePath(transientPath, juce::PathStrokeType(1.5f));
+    g.setFont(10.0f);
+    g.drawText("TRANSIENT DETECTOR  /  0–100%", 36, 206, 230, 14, juce::Justification::left);
+
     g.setFont(11.0f);
     g.setColour(juce::Colour(0xff9ba1aa));
     g.drawText("INPUT", 38, 98, 60, 16, juce::Justification::left);
@@ -91,7 +108,7 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
 
     const float inDb = processor.getInputPeak() > 1.0e-6f ? juce::Decibels::gainToDecibels(processor.getInputPeak()) : -120.0f;
     const float outDb = processor.getOutputPeak() > 1.0e-6f ? juce::Decibels::gainToDecibels(processor.getOutputPeak()) : -120.0f;
-    const auto metricsY = 260;
+    const auto metricsY = 250;
     g.setColour(juce::Colour(0xffb8b8b8));
     g.setFont(13.0f);
     g.drawText("IN PEAK  " + juce::String(inDb, 1) + " dBFS", 30, metricsY, 160, 22, juce::Justification::left);
