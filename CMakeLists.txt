@@ -15,12 +15,18 @@ FetchContent_Declare(
 )
 FetchContent_MakeAvailable(JUCE)
 
+# Audio Unit is a macOS format; keep Windows/Linux CI focused on VST3.
+set(DPC_PLUGIN_FORMATS VST3)
+if(APPLE)
+    list(APPEND DPC_PLUGIN_FORMATS AU)
+endif()
+
 juce_add_plugin(DPC_vst
     COMPANY_NAME "Yassine Talbi"
     BUNDLE_ID "com.yasstlb.dpcvst"
     PLUGIN_MANUFACTURER_CODE Ystb
     PLUGIN_CODE Dpc1
-    FORMATS VST3 AU
+    FORMATS ${DPC_PLUGIN_FORMATS}
     PRODUCT_NAME "DPC"
     IS_SYNTH FALSE
     NEEDS_MIDI_INPUT FALSE
