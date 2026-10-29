@@ -143,7 +143,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         return juce::jlimit(-1.0f, 1.0f, y) * safeThreshold;
     };
 
-    const auto getTransientThreshold = [this, detail](float linkedLevel, float baseThreshold)
+    const auto getTransientThreshold = [this, detail, &blockTransientActivity](float linkedLevel, float baseThreshold)
     {
         const float fastCoeff = linkedLevel > fastEnvelope ? fastAttackCoeff : fastReleaseCoeff;
         const float slowCoeff = linkedLevel > slowEnvelope ? slowAttackCoeff : slowReleaseCoeff;
