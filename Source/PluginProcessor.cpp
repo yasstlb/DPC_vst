@@ -93,6 +93,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     const int samples = buffer.getNumSamples();
     const int mode = static_cast<int>(parameters.getRawParameterValue("MODE")->load());
     const float detail = parameters.getRawParameterValue("DETAIL")->load();
+    const float clipAmount = parameters.getRawParameterValue("CLIP")->load();
     const float outputDb = parameters.getRawParameterValue("OUTPUT")->load();
     const float thresholdTarget = juce::Decibels::decibelsToGain(
         -parameters.getRawParameterValue("CLIP")->load());
@@ -125,8 +126,9 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 
     // DETAIL is a transient-preservation control, not a blend between waveshapers.
     // Fast/slow envelope divergence raises the effective threshold briefly on attacks.
-    const auto shapeSample = [mode, ironNorm, heatNorm](float input, float threshold)
+    const auto shapeSample = [mode, ironNorm, heatNorm, clipAmount](float input, float threshold)
     {
+        if (clipAmount <= 0.0001f) return input;
         const float safeThreshold = juce::jmax(threshold, 1.0e-6f);
         const float driven = input / safeThreshold;
         float y = 0.0f;
@@ -151,6 +153,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         const float transient = juce::jlimit(0.0f, 1.0f,
             (fastEnvelope - slowEnvelope) / (fastEnvelope + 1.0e-5f));
         // Cap the lift at +6 dB rather than tripling the threshold at full DETAIL.
+        blockTransientActivity = juce::jmax(blockTransientActivity, transient);
         const float thresholdLift = 1.0f + detail * transient;
         return baseThreshold * thresholdLift;
     };
@@ -177,8 +180,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
                 std::abs(wetBlock.getSample(0, i)),
                 std::abs(wetBlock.getSample(1, i)));
             const float transientAwareThreshold = getTransientThreshold(linkedLevel, threshold);
-            if (linkedLevel > transientAwareThreshold) blockClipActivity = juce::jmax(blockClipActivity, 1.0f);
-            if (linkedLevel > transientAwareThreshold) blockClipActivity = juce::jmax(blockClipActivity, 1.0f);
+            if (linkedLevel > transientAwareThreshold) blockClipActivity = 1.0f;
             for (size_t ch = 0; ch < wetBlock.getNumChannels(); ++ch)
             {
                 auto* data = wetBlock.getChannelPointer(ch);
@@ -198,6 +200,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
             for (int ch = 0; ch < channels; ++ch)
                 linkedLevel = juce::jmax(linkedLevel, std::abs(buffer.getSample(ch, i)));
             const float transientAwareThreshold = getTransientThreshold(linkedLevel, threshold);
+            if (linkedLevel > transientAwareThreshold) blockClipActivity = 1.0f;
             for (int ch = 0; ch < channels; ++ch)
             {
                 const float input = buffer.getSample(ch, i);
