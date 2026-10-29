@@ -48,10 +48,14 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     fastReleaseCoeff = envelopeCoeff(0.040f);
     slowAttackCoeff = envelopeCoeff(0.025f);
     slowReleaseCoeff = envelopeCoeff(0.180f);
+    fastEnvelope = 0.0f;
+    slowEnvelope = 0.0f;
+    dcBlockerCoeff = std::exp(-2.0f * juce::MathConstants<float>::pi * 20.0f
+                              / static_cast<float>(sampleRate));
     for (int ch = 0; ch < 2; ++ch)
     {
-        fastEnvelope[ch] = 0.0f;
-        slowEnvelope[ch] = 0.0f;
+        dcInput[ch] = 0.0f;
+        dcOutput[ch] = 0.0f;
     }
     wetMix.reset(sampleRate, 0.005);
     wetMix.setCurrentAndTargetValue(parameters.getRawParameterValue("MIX")->load());
@@ -126,19 +130,26 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         return juce::jlimit(-1.0f, 1.0f, y) * safeThreshold;
     };
 
-    const auto getTransientThreshold = [this, detail](float input, int channel, float baseThreshold)
+    const auto getTransientThreshold = [this, detail](float linkedLevel, float baseThreshold)
     {
-        const float level = std::abs(input);
-        const float fastCoeff = level > fastEnvelope[channel] ? fastAttackCoeff : fastReleaseCoeff;
-        const float slowCoeff = level > slowEnvelope[channel] ? slowAttackCoeff : slowReleaseCoeff;
-
-        fastEnvelope[channel] = fastCoeff * fastEnvelope[channel] + (1.0f - fastCoeff) * level;
-        slowEnvelope[channel] = slowCoeff * slowEnvelope[channel] + (1.0f - slowCoeff) * level;
+        const float fastCoeff = linkedLevel > fastEnvelope ? fastAttackCoeff : fastReleaseCoeff;
+        const float slowCoeff = linkedLevel > slowEnvelope ? slowAttackCoeff : slowReleaseCoeff;
+        fastEnvelope = fastCoeff * fastEnvelope + (1.0f - fastCoeff) * linkedLevel;
+        slowEnvelope = slowCoeff * slowEnvelope + (1.0f - slowCoeff) * linkedLevel;
 
         const float transient = juce::jlimit(0.0f, 1.0f,
-            (fastEnvelope[channel] - slowEnvelope[channel]) / (fastEnvelope[channel] + 1.0e-5f));
-        const float thresholdLift = 1.0f + detail * transient * 2.0f;
+            (fastEnvelope - slowEnvelope) / (fastEnvelope + 1.0e-5f));
+        // Cap the lift at +6 dB rather than tripling the threshold at full DETAIL.
+        const float thresholdLift = 1.0f + detail * transient;
         return baseThreshold * thresholdLift;
+    };
+
+    const auto removeDc = [this](float input, int channel)
+    {
+        const float output = input - dcInput[channel] + dcBlockerCoeff * dcOutput[channel];
+        dcInput[channel] = input;
+        dcOutput[channel] = output;
+        return output;
     };
 
     if (channels == 2)
@@ -151,12 +162,14 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         for (size_t i = 0; i < wetBlock.getNumSamples(); ++i)
         {
             const float threshold = clipThreshold.getNextValue();
+            const float linkedLevel = juce::jmax(
+                std::abs(wetBlock.getSample(0, i)),
+                std::abs(wetBlock.getSample(1, i)));
+            const float transientAwareThreshold = getTransientThreshold(linkedLevel, threshold);
             for (size_t ch = 0; ch < wetBlock.getNumChannels(); ++ch)
             {
                 auto* data = wetBlock.getChannelPointer(ch);
-                const auto channel = static_cast<int>(ch);
-                const float transientAwareThreshold = getTransientThreshold(data[i], channel, threshold);
-                data[i] = shapeSample(data[i], transientAwareThreshold);
+                data[i] = removeDc(shapeSample(data[i], transientAwareThreshold), static_cast<int>(ch));
             }
         }
         oversampling.processSamplesDown(block);
@@ -168,11 +181,14 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         for (int i = 0; i < samples; ++i)
         {
             const float threshold = clipThreshold.getNextValue();
+            float linkedLevel = 0.0f;
+            for (int ch = 0; ch < channels; ++ch)
+                linkedLevel = juce::jmax(linkedLevel, std::abs(buffer.getSample(ch, i)));
+            const float transientAwareThreshold = getTransientThreshold(linkedLevel, threshold);
             for (int ch = 0; ch < channels; ++ch)
             {
                 const float input = buffer.getSample(ch, i);
-                const float transientAwareThreshold = getTransientThreshold(input, ch, threshold);
-                buffer.setSample(ch, i, shapeSample(input, transientAwareThreshold));
+                buffer.setSample(ch, i, removeDc(shapeSample(input, transientAwareThreshold), ch));
             }
         }
     }
