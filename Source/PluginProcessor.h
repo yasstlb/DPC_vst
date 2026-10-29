@@ -33,5 +33,11 @@ public:
 private:
     static juce::AudioProcessorValueTreeState::ParameterLayout createParameterLayout();
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> outputGain;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> clipThreshold;
+    juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> wetMix;
+    juce::dsp::Oversampling<float> oversampling { 2, 2,
+        juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, true };
+    juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> dryDelay { 8192 };
+    int oversamplingLatency = 0;
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(DPC_vstAudioProcessor)
 };
