@@ -37,6 +37,7 @@ public:
     int getSpectrumWritePosition() const { return spectrumPublished.load(std::memory_order_acquire); }
     float getSpectrumInput(int index) const { return spectrumInput[(size_t)index].load(std::memory_order_relaxed); }
     float getSpectrumOutput(int index) const { return spectrumOutput[(size_t)index].load(std::memory_order_relaxed); }
+    float getSpectrumReinjection(int index) const { return spectrumReinjection[(size_t)index].load(std::memory_order_relaxed); }
     double getSpectrumSampleRate() const { return spectrumSampleRate.load(std::memory_order_relaxed); }
     float getInputScopeSample(int i) const { return inputScope[(size_t)i].load(std::memory_order_relaxed); }
     float getOutputScopeSample(int i) const { return outputScope[(size_t)i].load(std::memory_order_relaxed); }
@@ -56,6 +57,9 @@ private:
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> dryDelay { 8192 };
     int oversamplingLatency = 0;
     juce::AudioBuffer<float> dryBuffer;
+    juce::AudioBuffer<float> reinjectionBuffer;
+    juce::dsp::Oversampling<float> reinjectionOversampling { 2, 2,
+        juce::dsp::Oversampling<float>::filterHalfBandPolyphaseIIR, true, true };
 
     // Complementary 3-region crossover (~180 Hz / ~2.8 kHz).
     // Per-region linked fast/slow transient detectors, with independent
@@ -73,10 +77,10 @@ private:
 
     // Broadband transient detector; spectral analysis is performed on the UI thread.
     // Stateful, per-channel colour stages. No dynamic allocation in the sample loop.
-    float ironMemory[2][detailRegions] {};
-    float ironLow[2][detailRegions] {};
-    float heatLow[2][detailRegions] {};
-    float heatAir[2][detailRegions] {};
+    float ironMemory[2] {};
+    float ironLow[2] {};
+    float heatLow[2] {};
+    float heatAir[2] {};
     float ironMemoryCoeff = 0.0f;
     float ironLowCoeff = 0.0f;
     float heatLowCoeff = 0.0f;
@@ -94,6 +98,7 @@ private:
     // Continuous audio capture for UI-thread FFT; no FFT work on audio thread.
     std::array<std::atomic<float>, fftSize> spectrumInput {};
     std::array<std::atomic<float>, fftSize> spectrumOutput {};
+    std::array<std::atomic<float>, fftSize> spectrumReinjection {};
     std::atomic<int> spectrumPublished { 0 };
     std::atomic<double> spectrumSampleRate { 48000.0 };
     int spectrumWriter = 0;
