@@ -106,6 +106,8 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     const float ironNorm = std::tanh(1.08f);
     const float heatNorm = std::tanh(1.8f);
     float blockInputPeak = 0.0f, blockOutputPeak = 0.0f, blockClipActivity = 0.0f, blockTransientActivity = 0.0f;
+    float clippingStrengthSum = 0.0f;
+    int clippingFrames = 0;
     // Resample each host block to a fixed-width scope, including short blocks.
     for (int bin = 0; bin < scopeSize; ++bin)
     {
@@ -199,7 +201,10 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
                 std::abs(wetBlock.getSample(0, i)),
                 std::abs(wetBlock.getSample(1, i)));
             const float transientAwareThreshold = getTransientThreshold(linkedLevel, threshold);
-            if (linkedLevel > transientAwareThreshold) blockClipActivity = 1.0f;
+            // Fractional clipping intensity: how far the actual peak exceeds its DETAIL-aware threshold.
+            const float excess = juce::jmax(0.0f, linkedLevel - transientAwareThreshold);
+            clippingStrengthSum += juce::jlimit(0.0f, 1.0f, excess / juce::jmax(linkedLevel, 1.0e-6f));
+            ++clippingFrames;
             for (size_t ch = 0; ch < wetBlock.getNumChannels(); ++ch)
             {
                 auto* data = wetBlock.getChannelPointer(ch);
@@ -219,7 +224,10 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
             for (int ch = 0; ch < channels; ++ch)
                 linkedLevel = juce::jmax(linkedLevel, std::abs(buffer.getSample(ch, i)));
             const float transientAwareThreshold = getTransientThreshold(linkedLevel, threshold);
-            if (linkedLevel > transientAwareThreshold) blockClipActivity = 1.0f;
+            // Fractional clipping intensity: how far the actual peak exceeds its DETAIL-aware threshold.
+            const float excess = juce::jmax(0.0f, linkedLevel - transientAwareThreshold);
+            clippingStrengthSum += juce::jlimit(0.0f, 1.0f, excess / juce::jmax(linkedLevel, 1.0e-6f));
+            ++clippingFrames;
             for (int ch = 0; ch < channels; ++ch)
             {
                 const float input = buffer.getSample(ch, i);
@@ -284,6 +292,8 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     spectrumPublished.store(spectrumWriter, std::memory_order_release);
     inputPeak.store(blockInputPeak, std::memory_order_relaxed);
     outputPeak.store(blockOutputPeak, std::memory_order_relaxed);
+    blockClipActivity = (clipAmount > 0.0001f && clippingFrames > 0)
+        ? clippingStrengthSum / static_cast<float>(clippingFrames) : 0.0f;
     clipActivity.store(blockClipActivity, std::memory_order_relaxed);
     transientActivity.store(blockTransientActivity, std::memory_order_relaxed);
 }
