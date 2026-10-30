@@ -3,7 +3,8 @@
 #include <JuceHeader.h>
 #include "PluginProcessor.h"
 
-class DPC_vstAudioProcessorEditor final : public juce::AudioProcessorEditor
+class DPC_vstAudioProcessorEditor final : public juce::AudioProcessorEditor,
+                                         private juce::Timer
 {
 public:
     explicit DPC_vstAudioProcessorEditor(DPC_vstAudioProcessor&);
@@ -12,6 +13,16 @@ public:
     void resized() override;
 
 private:
+    void timerCallback() override;
+    void updateSpectrum();
+    juce::dsp::FFT fft { 11 };
+    std::array<float, DPC_vstAudioProcessor::fftSize * 2> fftInput {};
+    std::array<float, DPC_vstAudioProcessor::fftSize * 2> fftOutput {};
+    std::array<float, DPC_vstAudioProcessor::fftSize * 2> fftReinjection {};
+    static constexpr int spectrumPoints = 256;
+    std::array<float, spectrumPoints> inputSpectrum {}, outputSpectrum {}, spectralDelta {}, foldShape {};
+    float clipGlow = 0.0f;
+    float transientGlow = 0.0f;
     DPC_vstAudioProcessor& processor;
     juce::ComboBox modeBox;
     juce::Slider clipSlider, detailSlider, mixSlider, outputSlider;
