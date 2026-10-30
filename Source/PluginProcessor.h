@@ -62,6 +62,9 @@ private:
     // detail-preservation bypass. This is NOT an FFT-bin-by-bin processor.
     static constexpr int detailRegions = 3;
     float detailSplit[2][2] {};
+    // Separate one-pole states used to split the clipper *residual* (input - shaped)
+    // into the same three regions. Independent of detailSplit, which splits the input.
+    float residualSplit[2][2] {};
     float detailFast[detailRegions] {};
     float detailSlow[detailRegions] {};
     float detailProtect[detailRegions] {};
