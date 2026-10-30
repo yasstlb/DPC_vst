@@ -270,6 +270,19 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         }
     }
 
+    // Publish the wet signal BEFORE MIX and OUTPUT, so the spectral visualization
+    // measures the nonlinear processor rather than user gain compensation.
+    for (int i = 0; i < samples; ++i)
+    {
+        float wetSum = 0.0f;
+        for (int ch = 0; ch < channels; ++ch)
+            wetSum += buffer.getSample(ch, i);
+        const int ringIndex = (spectrumWriter + i) % fftSize;
+        spectrumOutput[(size_t)ringIndex].store(
+            wetSum / static_cast<float>(juce::jmax(1, channels)),
+            std::memory_order_relaxed);
+    }
+
     for (int i = 0; i < samples; ++i)
     {
         const float gain = outputGain.getNextValue();
@@ -308,19 +321,16 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         sample /= static_cast<float>(juce::jmax(1, channels));
         outputScope[(size_t)bin].store(sample, std::memory_order_relaxed);
     }
-    // Publish a rolling pair of pre/post samples for the spectral overlay.
-    // Both taps use the host rate; post tap is after wet mix and output gain.
+    // Publish input samples on the same rolling timeline as the wet-only tap.
     for (int i = 0; i < samples; ++i)
     {
-        float in = 0.0f, out = 0.0f;
+        float in = 0.0f;
         for (int ch = 0; ch < channels; ++ch)
         {
             in += dryBuffer.getSample(ch, i);
-            out += buffer.getSample(ch, i);
         }
         const float invChannels = 1.0f / static_cast<float>(juce::jmax(1, channels));
         spectrumInput[(size_t)spectrumWriter].store(in * invChannels, std::memory_order_relaxed);
-        spectrumOutput[(size_t)spectrumWriter].store(out * invChannels, std::memory_order_relaxed);
         spectrumWriter = (spectrumWriter + 1) % fftSize;
     }
     spectrumPublished.store(spectrumWriter, std::memory_order_release);
