@@ -18,7 +18,8 @@ private:
     juce::dsp::FFT fft { 11 };
     std::array<float, DPC_vstAudioProcessor::fftSize * 2> fftInput {};
     std::array<float, DPC_vstAudioProcessor::fftSize * 2> fftOutput {};
-    std::array<float, DPC_vstAudioProcessor::scopeSize> inputSpectrum {}, outputSpectrum {};
+    static constexpr int spectrumPoints = 256;
+    std::array<float, spectrumPoints> inputSpectrum {}, outputSpectrum {}, spectralDelta {};
     DPC_vstAudioProcessor& processor;
     juce::ComboBox modeBox;
     juce::Slider clipSlider, detailSlider, mixSlider, outputSlider;
