@@ -92,7 +92,9 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
         const float outY = position(outputSpectrum[(size_t)i]);
         // Expressive spectral folding gesture driven by measured FFT movement.
         // This is intentionally NOT a map of affected clipper frequencies.
-        const float foldY = graph.getY() + 18.0f + graph.getHeight() * 0.46f * foldShape[(size_t)i];
+        // Bends unfold around the middle line, in BOTH directions. Derived only
+        // from the input spectrum; never from CLIP, processed output or DETAIL.
+        const float foldY = graph.getY() + graph.getHeight() * (0.48f + 0.38f * foldShape[(size_t)i]);
         if (i == 0)
         {
             inputArea.startNewSubPath(x, graph.getBottom());
@@ -118,12 +120,26 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     g.strokePath(foldLine, juce::PathStrokeType(5.0f));
     g.setColour(accent.withAlpha(0.75f + 0.25f * glow));
     g.strokePath(foldLine, juce::PathStrokeType(1.65f));
-    // Compact peak-clipping activity meter, sourced from the audio-thread detector.
-    g.setColour(juce::Colour(0xff252c3a));
-    g.fillRoundedRectangle(graph.getRight() - 91.0f, graph.getY() + 15.0f, 72.0f, 4.0f, 2.0f);
-    g.setColour(accent.withAlpha(0.40f + 0.60f * glow));
-    g.fillRoundedRectangle(graph.getRight() - 91.0f, graph.getY() + 15.0f,
-                           72.0f * glow, 4.0f, 2.0f);
+    // An unambiguous clipping meter, separate from the spectral fold gesture.
+    constexpr float meterX = 514.0f;
+    constexpr float meterWidth = 145.0f;
+    constexpr float meterY = 126.0f;
+    g.setColour(juce::Colour(0xee0b0f19));
+    g.fillRoundedRectangle(meterX - 8.0f, meterY - 17.0f, meterWidth + 17.0f, 42.0f, 5.0f);
+    g.setColour(juce::Colour(0xffcbd0e0));
+    g.setFont(juce::Font(juce::FontOptions(10.0f)));
+    g.drawText("CLIP ACTIVITY", juce::roundToInt(meterX), juce::roundToInt(meterY - 15.0f),
+               106, 12, juce::Justification::left);
+    g.setColour(juce::Colour(0xff242b3b));
+    g.fillRoundedRectangle(meterX, meterY + 4.0f, meterWidth, 9.0f, 4.0f);
+    g.setColour(accent.withAlpha(0.60f + 0.40f * glow));
+    if (glow > 0.001f)
+        g.fillRoundedRectangle(meterX, meterY + 4.0f,
+                               juce::jmax(2.0f, meterWidth * glow), 9.0f, 4.0f);
+    g.setColour(juce::Colour(0xffdce4ff));
+    g.drawText(juce::String(juce::roundToInt(glow * 100.0f)) + "%",
+               juce::roundToInt(meterX + 110.0f), juce::roundToInt(meterY - 15.0f),
+               35, 12, juce::Justification::right);
     g.restoreState();
     g.setColour(juce::Colour(0xffa3a9ba));
     g.setFont(10.0f);
@@ -138,8 +154,8 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     g.drawText("LIVE SPECTRAL TRANSFORMATION", 42, 101, 330, 20, juce::Justification::left);
     g.setColour(juce::Colour(0xff949ba5));
     g.setFont(10.0f);
-    g.drawText("BLUE: input   /   CYAN: output   /   PINK: spectral motion   /   BRIGHTNESS: clipping", 36, 330, 645, 18, juce::Justification::left);
-    g.drawText("Expressive fold gesture follows spectral attacks; glow tracks measured clip intensity.", 36, 351, 645, 18, juce::Justification::left);
+    g.drawText("BLUE: input   /   CYAN: output   /   PINK: input spectral folds   /   GLOW: clipping", 36, 330, 645, 18, juce::Justification::left);
+    g.drawText("Pink depends on input spectrum only; clip activity has its own meter.", 36, 351, 645, 18, juce::Justification::left);
 }
 
 void DPC_vstAudioProcessorEditor::timerCallback()
@@ -185,14 +201,21 @@ void DPC_vstAudioProcessorEditor::updateSpectrum()
         inputSpectrum[(size_t)i] += 0.32f * (inputDb - inputSpectrum[(size_t)i]);
         outputSpectrum[(size_t)i] += 0.32f * (outputDb - outputSpectrum[(size_t)i]);
         spectralDelta[(size_t)i] += 0.28f * (delta - spectralDelta[(size_t)i]);
-        // Rising spectral energy creates localized fold gestures; steady tones settle.
-        // No free-running animation: movement derives from successive FFT frames.
-        const float onset = juce::jlimit(0.0f, 1.0f,
-            (inputDb - inputSpectrum[(size_t)i] + 1.5f) / 17.0f);
-        const float energy = juce::jlimit(0.0f, 1.0f, (inputDb + 72.0f) / 58.0f);
-        const float targetFold = energy * (0.28f + 0.72f * onset)
-            * (0.40f + 0.60f * transientGlow);
-        foldShape[(size_t)i] += 0.24f * (targetFold - foldShape[(size_t)i]);
+        // Spectral "fold" is an expressive visualization, not mathematical
+        // wavefolding or a clipping-frequency mask. Use INPUT ONLY so that
+        // turning CLIP or DETAIL cannot reshape this curve.
+        const int left = juce::jmax(0, i - 3);
+        const int right = juce::jmin(spectrumPoints - 1, i + 3);
+        const float neighbouring = 0.5f * (inputSpectrum[(size_t)left]
+                                           + inputSpectrum[(size_t)right]);
+        const float spectralBend = juce::jlimit(-1.0f, 1.0f,
+            (inputDb - neighbouring) / 20.0f);
+        const float spectralRise = juce::jlimit(0.0f, 1.0f,
+            (inputDb - inputSpectrum[(size_t)i]) / 12.0f);
+        const float presence = juce::jlimit(0.0f, 1.0f, (inputDb + 78.0f) / 45.0f);
+        const float targetFold = presence * (0.70f * spectralBend
+                               + 0.30f * spectralRise);
+        foldShape[(size_t)i] += 0.25f * (targetFold - foldShape[(size_t)i]);
     }
 }
 
