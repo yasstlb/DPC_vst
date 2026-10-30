@@ -18,6 +18,7 @@ private:
     juce::dsp::FFT fft { 11 };
     std::array<float, DPC_vstAudioProcessor::fftSize * 2> fftInput {};
     std::array<float, DPC_vstAudioProcessor::fftSize * 2> fftOutput {};
+    std::array<float, DPC_vstAudioProcessor::fftSize * 2> fftReinjection {};
     static constexpr int spectrumPoints = 256;
     std::array<float, spectrumPoints> inputSpectrum {}, outputSpectrum {}, spectralDelta {}, foldShape {};
     float clipGlow = 0.0f;
