@@ -35,6 +35,7 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     spectrumSampleRate.store(sampleRate, std::memory_order_relaxed);
     for (auto& v : spectrumInput) v.store(0.0f, std::memory_order_relaxed);
     for (auto& v : spectrumOutput) v.store(0.0f, std::memory_order_relaxed);
+    for (auto& v : spectrumReinjection) v.store(0.0f, std::memory_order_relaxed);
 
     outputGain.reset(sampleRate, 0.02);
     outputGain.setCurrentAndTargetValue(juce::Decibels::decibelsToGain(
@@ -78,10 +79,10 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     heatAirCoeff = pole(10500.0f);
     for (int ch = 0; ch < 2; ++ch)
     {
-        for (auto& state : ironMemory[ch]) state = 0.0f;
-        for (auto& state : ironLow[ch]) state = 0.0f;
-        for (auto& state : heatLow[ch]) state = 0.0f;
-        for (auto& state : heatAir[ch]) state = 0.0f;
+        ironMemory[ch] = 0.0f;
+        ironLow[ch] = 0.0f;
+        heatLow[ch] = 0.0f;
+        heatAir[ch] = 0.0f;
     }
     dcBlockerCoeff = std::exp(-2.0f * juce::MathConstants<float>::pi * 20.0f
                               / static_cast<float>(processingRate));
@@ -96,6 +97,9 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     dryBuffer.setSize(2, juce::jmax(1, samplesPerBlock), false, false, true);
     oversampling.initProcessing(static_cast<size_t>(juce::jmax(1, samplesPerBlock)));
     oversampling.reset();
+    reinjectionBuffer.setSize(2, juce::jmax(1, samplesPerBlock), false, false, true);
+    reinjectionOversampling.initProcessing(static_cast<size_t>(juce::jmax(1, samplesPerBlock)));
+    reinjectionOversampling.reset();
     oversamplingLatency = stereo ? juce::roundToInt(oversampling.getLatencyInSamples()) : 0;
 
     dryDelay.setMaximumDelayInSamples(8191);
@@ -108,6 +112,7 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
 void DPC_vstAudioProcessor::releaseResources()
 {
     oversampling.reset();
+    reinjectionOversampling.reset();
     dryDelay.reset();
 }
 
@@ -165,13 +170,16 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 
     if (dryBuffer.getNumSamples() < samples)
         dryBuffer.setSize(2, samples, false, false, true);
+    if (reinjectionBuffer.getNumSamples() < samples)
+        reinjectionBuffer.setSize(2, samples, false, false, true);
+    reinjectionBuffer.clear();
     for (int ch = 0; ch < channels; ++ch)
         dryBuffer.copyFrom(ch, 0, buffer, ch, 0, samples);
 
     // CORE has unity small-signal slope. IRON and HEAT apply ONLY the
     // nonlinear residual, avoiding their former small-signal amplification
     // and removing the linear coloration of their internal filters.
-    const auto shapeSample = [this, mode, clipAmount](float input, float threshold, int ch, int region)
+    const auto shapeSample = [this, mode, clipAmount](float input, float threshold, int ch
     {
         if (clipAmount <= 0.0001f) return input;
         const float safeThreshold = juce::jmax(threshold, 1.0e-5f);
@@ -181,24 +189,24 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 
         if (mode == 1)
         {
-            ironLow[ch][region] += ironLowCoeff * (x - ironLow[ch][region]);
-            const float excitation = x + 0.11f * ironLow[ch][region];
+            ironLow[ch] += ironLowCoeff * (x - ironLow[ch]);
+            const float excitation = x + 0.11f * ironLow[ch];
             const float rate = ironMemoryCoeff / (1.0f + 0.7f * std::abs(excitation));
-            ironMemory[ch][region] += rate * (excitation - ironMemory[ch][region]);
-            const float flux = excitation - 0.10f * ironMemory[ch][region];
+            ironMemory[ch] += rate * (excitation - ironMemory[ch]);
+            const float flux = excitation - 0.10f * ironMemory[ch];
             const float asym = flux + 0.075f * flux * flux / (1.0f + std::abs(flux));
             const float nonlinearResidual = std::tanh(1.35f * asym) / 1.35f - flux;
             return juce::jlimit(-1.0f, 1.0f, x + nonlinearResidual) * safeThreshold;
         }
 
-        heatLow[ch][region] += heatLowCoeff * (x - heatLow[ch][region]);
-        const float emphasized = x + 0.18f * (x - heatLow[ch][region]);
+        heatLow[ch] += heatLowCoeff * (x - heatLow[ch]);
+        const float emphasized = x + 0.18f * (x - heatLow[ch]);
         const float stageOne = std::tanh(1.45f * emphasized) / 1.45f;
         const float stageTwo = std::tanh(1.75f * stageOne) / 1.75f;
         const float nonlinearResidual = stageTwo - emphasized;
-        heatAir[ch][region] += heatAirCoeff * (nonlinearResidual - heatAir[ch][region]);
+        heatAir[ch] += heatAirCoeff * (nonlinearResidual - heatAir[ch]);
         return juce::jlimit(-1.0f, 1.0f,
-            x + 0.78f * nonlinearResidual + 0.22f * heatAir[ch][region]) * safeThreshold;
+            x + 0.78f * nonlinearResidual + 0.22f * heatAir[ch]) * safeThreshold;
     };
 
     // Complementary split: low + mid + high = input. The actual nonlinear
@@ -246,86 +254,112 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         return output;
     };
 
+    // Whole-signal clipping is done ONCE per channel. Only the residual
+    // r = x - clip(x) is split; no independent per-band clippers are summed.
     if (channels == 2)
     {
         auto block = juce::dsp::AudioBlock<float>(buffer);
         auto wetBlock = oversampling.processSamplesUp(block);
+        auto injectionBlock = juce::dsp::AudioBlock<float>(reinjectionBuffer).getSubBlock(
+            0, static_cast<size_t>(samples));
+        auto injectedOversampled = reinjectionOversampling.processSamplesUp(injectionBlock);
         for (size_t i = 0; i < wetBlock.getNumSamples(); ++i)
         {
             const float threshold = clipThreshold.getNextValue();
-            float regions[2][detailRegions] {};
+            float clipped[2] {};
+            float residualBands[2][detailRegions] {};
             float levels[detailRegions] {};
             for (int ch = 0; ch < 2; ++ch)
             {
-                separateRegions(wetBlock.getSample(static_cast<size_t>(ch), i), ch, regions[ch]);
+                const float x = wetBlock.getSample(static_cast<size_t>(ch), i);
+                clipped[ch] = shapeSample(x, threshold, ch);
+                separateRegions(x - clipped[ch], ch, residualBands[ch]);
                 for (int r = 0; r < detailRegions; ++r)
-                    levels[r] = juce::jmax(levels[r], std::abs(regions[ch][r]));
+                    levels[r] = juce::jmax(levels[r], std::abs(residualBands[ch][r]));
             }
+
             float protection[detailRegions] {};
             const float attack = updateProtection(levels, protection);
             blockTransientActivity = juce::jmax(blockTransientActivity, attack);
             const int scopeBin = juce::jmin(scopeSize - 1,
                 static_cast<int>(i * scopeSize / juce::jmax<size_t>(1, wetBlock.getNumSamples())));
             transientScope[(size_t)scopeBin].store(attack, std::memory_order_relaxed);
-            for (int r = 0; r < detailRegions; ++r)
-            {
-                const float excess = juce::jmax(0.0f, levels[r] - threshold);
-                clippingStrengthSum += (1.0f - protection[r])
-                    * juce::jlimit(0.0f, 1.0f, excess / juce::jmax(levels[r], 1.0e-6f));
-                ++clippingFrames;
-            }
             for (int ch = 0; ch < 2; ++ch)
             {
-                float sum = 0.0f;
+                const float x = wetBlock.getSample(static_cast<size_t>(ch), i);
+                float reinjected = 0.0f;
                 for (int r = 0; r < detailRegions; ++r)
-                {
-                    const float dry = regions[ch][r];
-                    const float wet = shapeSample(dry, threshold, ch, r);
-                    sum += wet + protection[r] * (dry - wet);
-                }
-                auto* data = wetBlock.getChannelPointer(static_cast<size_t>(ch));
-                data[i] = removeDc(sum, ch);
+                    reinjected += protection[r] * residualBands[ch][r];
+                // DETAIL=1 allows a maximum of 2T, but unbounded residual
+                // reinjection would otherwise invalidate that guarantee.
+                const float ceiling = threshold * (1.0f + detail);
+                const float restored = juce::jlimit(-ceiling, ceiling, clipped[ch] + reinjected);
+                const float effectiveInjection = restored - clipped[ch];
+                injectedOversampled.setSample(static_cast<size_t>(ch), i, effectiveInjection);
+                wetBlock.setSample(static_cast<size_t>(ch), i, removeDc(restored, ch));
+                clippingStrengthSum += juce::jlimit(0.0f, 1.0f,
+                    std::abs(x - clipped[ch]) / juce::jmax(std::abs(x), 1.0e-6f));
+                ++clippingFrames;
             }
         }
         oversampling.processSamplesDown(block);
+        reinjectionOversampling.processSamplesDown(injectionBlock);
     }
     else
     {
         for (int i = 0; i < samples; ++i)
         {
             const float threshold = clipThreshold.getNextValue();
-            float regions[detailRegions] {};
-            separateRegions(buffer.getSample(0, i), 0, regions);
+            const float x = buffer.getSample(0, i);
+            const float clipped = shapeSample(x, threshold, 0);
+            float residualBands[detailRegions] {};
+            separateRegions(x - clipped, 0, residualBands);
             float levels[detailRegions] {};
             for (int r = 0; r < detailRegions; ++r)
-                levels[r] = std::abs(regions[r]);
+                levels[r] = std::abs(residualBands[r]);
             float protection[detailRegions] {};
             const float attack = updateProtection(levels, protection);
             blockTransientActivity = juce::jmax(blockTransientActivity, attack);
             const int scopeBin = juce::jmin(scopeSize - 1, i * scopeSize / juce::jmax(1, samples));
             transientScope[(size_t)scopeBin].store(attack, std::memory_order_relaxed);
-            float sum = 0.0f;
+            float reinjected = 0.0f;
             for (int r = 0; r < detailRegions; ++r)
-            {
-                const float excess = juce::jmax(0.0f, levels[r] - threshold);
-                clippingStrengthSum += (1.0f - protection[r])
-                    * juce::jlimit(0.0f, 1.0f, excess / juce::jmax(levels[r], 1.0e-6f));
-                ++clippingFrames;
-                const float wet = shapeSample(regions[r], threshold, 0, r);
-                sum += wet + protection[r] * (regions[r] - wet);
-            }
-            buffer.setSample(0, i, removeDc(sum, 0));
+                reinjected += protection[r] * residualBands[r];
+            const float ceiling = threshold * (1.0f + detail);
+            const float restored = juce::jlimit(-ceiling, ceiling, clipped + reinjected);
+            reinjectionBuffer.setSample(0, i, restored - clipped);
+            buffer.setSample(0, i, removeDc(restored, 0));
+            clippingStrengthSum += juce::jlimit(0.0f, 1.0f,
+                std::abs(x - clipped) / juce::jmax(std::abs(x), 1.0e-6f));
+            ++clippingFrames;
         }
+    }
+
+    // Keep the wet ceiling valid even with DC blocker and IIR oversampling
+    // ringing (post-downsample clamp). MIX/OUTPUT may subsequently exceed it.
+    if (clipAmount > 0.0001f)
+    {
+        const float hostCeiling = clipThreshold.getCurrentValue() * (1.0f + detail);
+        for (int ch = 0; ch < channels; ++ch)
+            for (int i = 0; i < samples; ++i)
+                buffer.setSample(ch, i, juce::jlimit(-hostCeiling, hostCeiling,
+                    buffer.getSample(ch, i)));
     }
 
     // Publish the wet signal BEFORE MIX and OUTPUT, so the spectral visualization
     // measures the nonlinear processor rather than user gain compensation.
     for (int i = 0; i < samples; ++i)
     {
-        float wetSum = 0.0f;
+        float wetSum = 0.0f, injectionSum = 0.0f;
         for (int ch = 0; ch < channels; ++ch)
+        {
             wetSum += buffer.getSample(ch, i);
+            injectionSum += reinjectionBuffer.getSample(ch, i);
+        }
         const int ringIndex = (spectrumWriter + i) % fftSize;
+        spectrumReinjection[(size_t)ringIndex].store(
+            injectionSum / static_cast<float>(juce::jmax(1, channels)),
+            std::memory_order_relaxed);
         spectrumOutput[(size_t)ringIndex].store(
             wetSum / static_cast<float>(juce::jmax(1, channels)),
             std::memory_order_relaxed);
