@@ -78,10 +78,10 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     heatAirCoeff = pole(10500.0f);
     for (int ch = 0; ch < 2; ++ch)
     {
-        ironMemory[ch] = 0.0f;
-        ironLow[ch] = 0.0f;
-        heatLow[ch] = 0.0f;
-        heatAir[ch] = 0.0f;
+        for (auto& state : ironMemory[ch]) state = 0.0f;
+        for (auto& state : ironLow[ch]) state = 0.0f;
+        for (auto& state : heatLow[ch]) state = 0.0f;
+        for (auto& state : heatAir[ch]) state = 0.0f;
     }
     dcBlockerCoeff = std::exp(-2.0f * juce::MathConstants<float>::pi * 20.0f
                               / static_cast<float>(processingRate));
@@ -171,7 +171,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     // CORE has unity small-signal slope. IRON and HEAT apply ONLY the
     // nonlinear residual, avoiding their former small-signal amplification
     // and removing the linear coloration of their internal filters.
-    const auto shapeSample = [this, mode, clipAmount](float input, float threshold, int ch)
+    const auto shapeSample = [this, mode, clipAmount](float input, float threshold, int ch, int region)
     {
         if (clipAmount <= 0.0001f) return input;
         const float safeThreshold = juce::jmax(threshold, 1.0e-5f);
@@ -181,24 +181,24 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 
         if (mode == 1)
         {
-            ironLow[ch] += ironLowCoeff * (x - ironLow[ch]);
-            const float excitation = x + 0.11f * ironLow[ch];
+            ironLow[ch][region] += ironLowCoeff * (x - ironLow[ch][region]);
+            const float excitation = x + 0.11f * ironLow[ch][region];
             const float rate = ironMemoryCoeff / (1.0f + 0.7f * std::abs(excitation));
-            ironMemory[ch] += rate * (excitation - ironMemory[ch]);
-            const float flux = excitation - 0.10f * ironMemory[ch];
+            ironMemory[ch][region] += rate * (excitation - ironMemory[ch][region]);
+            const float flux = excitation - 0.10f * ironMemory[ch][region];
             const float asym = flux + 0.075f * flux * flux / (1.0f + std::abs(flux));
             const float nonlinearResidual = std::tanh(1.35f * asym) / 1.35f - flux;
             return juce::jlimit(-1.0f, 1.0f, x + nonlinearResidual) * safeThreshold;
         }
 
-        heatLow[ch] += heatLowCoeff * (x - heatLow[ch]);
-        const float emphasized = x + 0.18f * (x - heatLow[ch]);
+        heatLow[ch][region] += heatLowCoeff * (x - heatLow[ch][region]);
+        const float emphasized = x + 0.18f * (x - heatLow[ch][region]);
         const float stageOne = std::tanh(1.45f * emphasized) / 1.45f;
         const float stageTwo = std::tanh(1.75f * stageOne) / 1.75f;
         const float nonlinearResidual = stageTwo - emphasized;
-        heatAir[ch] += heatAirCoeff * (nonlinearResidual - heatAir[ch]);
+        heatAir[ch][region] += heatAirCoeff * (nonlinearResidual - heatAir[ch][region]);
         return juce::jlimit(-1.0f, 1.0f,
-            x + 0.78f * nonlinearResidual + 0.22f * heatAir[ch]) * safeThreshold;
+            x + 0.78f * nonlinearResidual + 0.22f * heatAir[ch][region]) * safeThreshold;
     };
 
     // Complementary split: low + mid + high = input. The actual nonlinear
@@ -280,7 +280,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
                 for (int r = 0; r < detailRegions; ++r)
                 {
                     const float dry = regions[ch][r];
-                    const float wet = shapeSample(dry, threshold, ch);
+                    const float wet = shapeSample(dry, threshold, ch, r);
                     sum += wet + protection[r] * (dry - wet);
                 }
                 auto* data = wetBlock.getChannelPointer(static_cast<size_t>(ch));
@@ -311,7 +311,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
                 clippingStrengthSum += (1.0f - protection[r])
                     * juce::jlimit(0.0f, 1.0f, excess / juce::jmax(levels[r], 1.0e-6f));
                 ++clippingFrames;
-                const float wet = shapeSample(regions[r], threshold, 0);
+                const float wet = shapeSample(regions[r], threshold, 0, r);
                 sum += wet + protection[r] * (regions[r] - wet);
             }
             buffer.setSample(0, i, removeDc(sum, 0));
