@@ -57,3 +57,11 @@ target_link_libraries(DPC_vst PRIVATE
     juce::juce_recommended_lto_flags
     juce::juce_recommended_warning_flags
 )
+
+# Lightweight DSP regression tests, built with the plugin shared-code target.
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(DPC_DSPTests Tests/DSPCeilingTest.cpp)
+    target_link_libraries(DPC_DSPTests PRIVATE DPC_vst juce::juce_audio_utils juce::juce_dsp)
+    add_test(NAME DPC_CeilingSweep COMMAND DPC_DSPTests)
+endif()
