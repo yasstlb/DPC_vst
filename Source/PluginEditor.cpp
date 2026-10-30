@@ -82,7 +82,7 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
         g.drawText(db == 0 ? "0 dB" : "-" + juce::String(db), 36, juce::roundToInt(y) + 2, 42, 13, juce::Justification::left);
     }
     std::array<float, 24> gains {};
-    for (int band = 0; band < DPC_vstAudioProcessor::foldbackBands; ++band)
+    for (int band = 0; band < 24; ++band)
         gains[(size_t)band] = 1.0f;
     juce::Path curve, area;
     constexpr int count = 192;
@@ -92,12 +92,12 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
         const float hz = 20.0f * std::pow(1000.0f, fraction);
         // Interpolate between 24 log-spaced DSP band measurements.
         const float bandPosition = juce::jlimit(0.0f,
-            static_cast<float>(DPC_vstAudioProcessor::foldbackBands - 1),
+            static_cast<float>(24 - 1),
             std::log(hz / 20.0f) / std::log(1000.0f) *
-                static_cast<float>(DPC_vstAudioProcessor::foldbackBands) - 0.5f);
-        const int lower = juce::jlimit(0, DPC_vstAudioProcessor::foldbackBands - 1,
+                static_cast<float>(24) - 0.5f);
+        const int lower = juce::jlimit(0, 24 - 1,
             static_cast<int>(bandPosition));
-        const int upper = juce::jmin(DPC_vstAudioProcessor::foldbackBands - 1, lower + 1);
+        const int upper = juce::jmin(24 - 1, lower + 1);
         const float t = bandPosition - static_cast<float>(lower);
         const float gain = gains[(size_t)lower] + t * (gains[(size_t)upper] - gains[(size_t)lower]);
         const float reduction = juce::jlimit(0.0f, 12.0f,
