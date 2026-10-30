@@ -22,6 +22,12 @@ jobs:
       - name: Build VST3
         run: cmake --build build --config Release --target DPC_vst_VST3
 
+      - name: Build DSP tests
+        run: cmake --build build --config Release --target DPC_DSPTests
+
+      - name: Run DSP ceiling sweep
+        run: ctest --test-dir build -C Release --output-on-failure
+
       - name: Upload VST3 build
         uses: actions/upload-artifact@v4
         with:
