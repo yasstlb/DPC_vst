@@ -20,7 +20,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout DPC_vstAudioProcessor::creat
     layout.add(std::make_unique<APF>("CLIP", "Clip",
         juce::NormalisableRange<float>(0.0f, 18.0f, 0.01f), 6.0f, " dB"));
     layout.add(std::make_unique<APF>("DETAIL", "Detail",
-        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.5f));
+        juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.0f));
     layout.add(std::make_unique<APF>("MIX", "Mix",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 1.0f));
     layout.add(std::make_unique<Bool>("STRICT_CEILING", "Strict Ceiling", false));
