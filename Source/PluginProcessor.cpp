@@ -55,8 +55,24 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     slowReleaseCoeff = envelopeCoeff(0.180f);
     fastEnvelope = 0.0f;
     slowEnvelope = 0.0f;
+    const auto pole = [processingRate](float hz)
+    {
+        return 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * hz
+                              / static_cast<float>(processingRate));
+    };
+    ironMemoryCoeff = pole(1800.0f);
+    ironLowCoeff = pole(120.0f);
+    heatLowCoeff = pole(350.0f);
+    heatAirCoeff = pole(10500.0f);
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        ironMemory[ch] = 0.0f;
+        ironLow[ch] = 0.0f;
+        heatLow[ch] = 0.0f;
+        heatAir[ch] = 0.0f;
+    }
     dcBlockerCoeff = std::exp(-2.0f * juce::MathConstants<float>::pi * 20.0f
-                              / static_cast<float>(sampleRate));
+                              / static_cast<float>(processingRate));
     for (int ch = 0; ch < 2; ++ch)
     {
         dcInput[ch] = 0.0f;
@@ -103,8 +119,6 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     const float thresholdTarget = juce::Decibels::decibelsToGain(
         -parameters.getRawParameterValue("CLIP")->load());
     const float mixTarget = parameters.getRawParameterValue("MIX")->load();
-    const float ironNorm = std::tanh(1.08f);
-    const float heatNorm = std::tanh(1.8f);
     float blockInputPeak = 0.0f, blockOutputPeak = 0.0f, blockClipActivity = 0.0f, blockTransientActivity = 0.0f;
     float clippingStrengthSum = 0.0f;
     int clippingFrames = 0;
@@ -144,21 +158,41 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 
     // DETAIL is a transient-preservation control, not a blend between waveshapers.
     // Fast/slow envelope divergence raises the effective threshold briefly on attacks.
-    const auto shapeSample = [mode, ironNorm, heatNorm, clipAmount](float input, float threshold)
+    // Three genuinely different processing topologies:
+    // CORE: instantaneous hard ceiling.
+    // IRON: asymmetric nonlinear magnetization-inspired stage with signal memory.
+    // HEAT: pre-emphasized, cascaded saturation with controlled top-end damping.
+    // IRON is a character model, not a physical transformer/hysteresis simulation.
+    const auto shapeSample = [this, mode, clipAmount](float input, float threshold, int ch)
     {
         if (clipAmount <= 0.0001f) return input;
-        const float safeThreshold = juce::jmax(threshold, 1.0e-6f);
-        const float driven = input / safeThreshold;
-        float y = 0.0f;
-
+        const float safeThreshold = juce::jmax(threshold, 1.0e-5f);
+        const float x = input / safeThreshold;
         if (mode == 0)
-            y = juce::jlimit(-1.0f, 1.0f, driven);
-        else if (mode == 1)
-            y = std::tanh(driven + 0.08f * driven * driven) / ironNorm;
-        else
-            y = std::tanh(driven * 1.8f) / heatNorm;
+            return juce::jlimit(-1.0f, 1.0f, x) * safeThreshold;
 
-        return juce::jlimit(-1.0f, 1.0f, y) * safeThreshold;
+        if (mode == 1)
+        {
+            // Low-frequency magnetization proxy and slower, amplitude-dependent memory.
+            ironLow[ch] += ironLowCoeff * (x - ironLow[ch]);
+            const float excitation = x + 0.11f * ironLow[ch];
+            const float memoryRate = ironMemoryCoeff / (1.0f + 0.7f * std::abs(excitation));
+            ironMemory[ch] += memoryRate * (excitation - ironMemory[ch]);
+            const float flux = excitation - 0.10f * ironMemory[ch];
+            const float asymmetric = flux + 0.075f * flux * flux / (1.0f + std::abs(flux));
+            const float shaped = std::tanh(1.35f * asymmetric) / std::tanh(1.35f);
+            return juce::jlimit(-1.0f, 1.0f, shaped) * safeThreshold;
+        }
+
+        // HEAT deliberately differs from IRON: two nonlinear stages, with a
+        // high-frequency transient emphasis before the first stage.
+        heatLow[ch] += heatLowCoeff * (x - heatLow[ch]);
+        const float emphasized = x + 0.18f * (x - heatLow[ch]);
+        const float first = std::tanh(1.45f * emphasized) / std::tanh(1.45f);
+        const float second = std::tanh(1.75f * first) / std::tanh(1.75f);
+        heatAir[ch] += heatAirCoeff * (second - heatAir[ch]);
+        const float softened = 0.78f * second + 0.22f * heatAir[ch];
+        return juce::jlimit(-1.0f, 1.0f, softened) * safeThreshold;
     };
 
     int transientScopeBin = 0;
@@ -208,7 +242,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
             for (size_t ch = 0; ch < wetBlock.getNumChannels(); ++ch)
             {
                 auto* data = wetBlock.getChannelPointer(ch);
-                data[i] = removeDc(shapeSample(data[i], transientAwareThreshold), static_cast<int>(ch));
+                data[i] = removeDc(shapeSample(data[i], transientAwareThreshold, static_cast<int>(ch)), static_cast<int>(ch));
             }
         }
         oversampling.processSamplesDown(block);
@@ -231,7 +265,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
             for (int ch = 0; ch < channels; ++ch)
             {
                 const float input = buffer.getSample(ch, i);
-                buffer.setSample(ch, i, removeDc(shapeSample(input, transientAwareThreshold), ch));
+                buffer.setSample(ch, i, removeDc(shapeSample(input, transientAwareThreshold, ch), ch));
             }
         }
     }
