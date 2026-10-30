@@ -55,6 +55,18 @@ void DPC_vstAudioProcessor::prepareToPlay(double sampleRate, int samplesPerBlock
     slowReleaseCoeff = envelopeCoeff(0.180f);
     fastEnvelope = 0.0f;
     slowEnvelope = 0.0f;
+    detailSplitCoeff[0] = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi
+                                       * 180.0f / static_cast<float>(processingRate));
+    detailSplitCoeff[1] = 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi
+                                       * 2800.0f / static_cast<float>(processingRate));
+    detailEnvelopeFastAttack = envelopeCoeff(0.0015f);
+    detailEnvelopeFastRelease = envelopeCoeff(0.035f);
+    detailEnvelopeSlowAttack = envelopeCoeff(0.030f);
+    detailEnvelopeSlowRelease = envelopeCoeff(0.170f);
+    for (auto& s : detailSplit) for (auto& v : s) v = 0.0f;
+    for (auto& v : detailFast) v = 0.0f;
+    for (auto& v : detailSlow) v = 0.0f;
+    for (auto& v : detailProtect) v = 0.0f;
     const auto pole = [processingRate](float hz)
     {
         return 1.0f - std::exp(-2.0f * juce::MathConstants<float>::pi * hz
@@ -156,13 +168,9 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     for (int ch = 0; ch < channels; ++ch)
         dryBuffer.copyFrom(ch, 0, buffer, ch, 0, samples);
 
-    // DETAIL is a transient-preservation control, not a blend between waveshapers.
-    // Fast/slow envelope divergence raises the effective threshold briefly on attacks.
-    // Three genuinely different processing topologies:
-    // CORE: instantaneous hard ceiling.
-    // IRON: asymmetric nonlinear magnetization-inspired stage with signal memory.
-    // HEAT: pre-emphasized, cascaded saturation with controlled top-end damping.
-    // IRON is a character model, not a physical transformer/hysteresis simulation.
+    // CORE has unity small-signal slope. IRON and HEAT apply ONLY the
+    // nonlinear residual, avoiding their former small-signal amplification
+    // and removing the linear coloration of their internal filters.
     const auto shapeSample = [this, mode, clipAmount](float input, float threshold, int ch)
     {
         if (clipAmount <= 0.0001f) return input;
@@ -173,44 +181,61 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
 
         if (mode == 1)
         {
-            // Low-frequency magnetization proxy and slower, amplitude-dependent memory.
             ironLow[ch] += ironLowCoeff * (x - ironLow[ch]);
             const float excitation = x + 0.11f * ironLow[ch];
-            const float memoryRate = ironMemoryCoeff / (1.0f + 0.7f * std::abs(excitation));
-            ironMemory[ch] += memoryRate * (excitation - ironMemory[ch]);
+            const float rate = ironMemoryCoeff / (1.0f + 0.7f * std::abs(excitation));
+            ironMemory[ch] += rate * (excitation - ironMemory[ch]);
             const float flux = excitation - 0.10f * ironMemory[ch];
-            const float asymmetric = flux + 0.075f * flux * flux / (1.0f + std::abs(flux));
-            const float shaped = std::tanh(1.35f * asymmetric) / std::tanh(1.35f);
-            return juce::jlimit(-1.0f, 1.0f, shaped) * safeThreshold;
+            const float asym = flux + 0.075f * flux * flux / (1.0f + std::abs(flux));
+            const float nonlinearResidual = std::tanh(1.35f * asym) / 1.35f - flux;
+            return juce::jlimit(-1.0f, 1.0f, x + nonlinearResidual) * safeThreshold;
         }
 
-        // HEAT deliberately differs from IRON: two nonlinear stages, with a
-        // high-frequency transient emphasis before the first stage.
         heatLow[ch] += heatLowCoeff * (x - heatLow[ch]);
         const float emphasized = x + 0.18f * (x - heatLow[ch]);
-        const float first = std::tanh(1.45f * emphasized) / std::tanh(1.45f);
-        const float second = std::tanh(1.75f * first) / std::tanh(1.75f);
-        heatAir[ch] += heatAirCoeff * (second - heatAir[ch]);
-        const float softened = 0.78f * second + 0.22f * heatAir[ch];
-        return juce::jlimit(-1.0f, 1.0f, softened) * safeThreshold;
+        const float stageOne = std::tanh(1.45f * emphasized) / 1.45f;
+        const float stageTwo = std::tanh(1.75f * stageOne) / 1.75f;
+        const float nonlinearResidual = stageTwo - emphasized;
+        heatAir[ch] += heatAirCoeff * (nonlinearResidual - heatAir[ch]);
+        return juce::jlimit(-1.0f, 1.0f,
+            x + 0.78f * nonlinearResidual + 0.22f * heatAir[ch]) * safeThreshold;
     };
 
-    int transientScopeBin = 0;
-    const auto getTransientThreshold = [this, detail, samples, &blockTransientActivity, &transientScopeBin](float linkedLevel, float baseThreshold)
+    // Complementary split: low + mid + high = input. The actual nonlinear
+    // output is generated separately for each region; transient regions
+    // crossfade toward their *unprocessed* signals under DETAIL.
+    const auto separateRegions = [this](float x, int ch, float (&regions)[detailRegions])
     {
-        const float fastCoeff = linkedLevel > fastEnvelope ? fastAttackCoeff : fastReleaseCoeff;
-        const float slowCoeff = linkedLevel > slowEnvelope ? slowAttackCoeff : slowReleaseCoeff;
-        fastEnvelope = fastCoeff * fastEnvelope + (1.0f - fastCoeff) * linkedLevel;
-        slowEnvelope = slowCoeff * slowEnvelope + (1.0f - slowCoeff) * linkedLevel;
-
-        const float transient = juce::jlimit(0.0f, 1.0f,
-            (fastEnvelope - slowEnvelope) / (fastEnvelope + 1.0e-5f));
-        // DETAIL scales the transient threshold lift up to 2x at full transient level.
-        blockTransientActivity = juce::jmax(blockTransientActivity, transient);
-        const int bin = juce::jmin(scopeSize - 1, transientScopeBin++ * scopeSize / juce::jmax(1, samples * (getTotalNumInputChannels() == 2 ? 4 : 1)));
-        transientScope[(size_t)bin].store(transient, std::memory_order_relaxed);
-        const float thresholdLift = 1.0f + detail * transient;
-        return baseThreshold * thresholdLift;
+        detailSplit[ch][0] += detailSplitCoeff[0] * (x - detailSplit[ch][0]);
+        detailSplit[ch][1] += detailSplitCoeff[1] * (x - detailSplit[ch][1]);
+        regions[0] = detailSplit[ch][0];
+        regions[1] = detailSplit[ch][1] - detailSplit[ch][0];
+        regions[2] = x - detailSplit[ch][1];
+    };
+    const auto updateProtection = [this, detail](const float (&levels)[detailRegions],
+                                                  float (&protection)[detailRegions])
+    {
+        float greatestAttack = 0.0f;
+        for (int region = 0; region < detailRegions; ++region)
+        {
+            const float value = levels[region];
+            const float fastCoeff = value > detailFast[region]
+                ? detailEnvelopeFastAttack : detailEnvelopeFastRelease;
+            const float slowCoeff = value > detailSlow[region]
+                ? detailEnvelopeSlowAttack : detailEnvelopeSlowRelease;
+            detailFast[region] = fastCoeff * detailFast[region] + (1.0f - fastCoeff) * value;
+            detailSlow[region] = slowCoeff * detailSlow[region] + (1.0f - slowCoeff) * value;
+            const float attack = juce::jlimit(0.0f, 1.0f,
+                (detailFast[region] - detailSlow[region])
+                / (detailFast[region] + 1.0e-5f));
+            // Attack-only bypass. Higher DETAIL keeps more of the original
+            // transient in that region while leaving sustained content clipped.
+            const float target = detail * attack;
+            detailProtect[region] += 0.14f * (target - detailProtect[region]);
+            protection[region] = detailProtect[region];
+            greatestAttack = juce::jmax(greatestAttack, attack);
+        }
+        return greatestAttack;
     };
 
     const auto removeDc = [this](float input, int channel)
@@ -225,48 +250,71 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     {
         auto block = juce::dsp::AudioBlock<float>(buffer);
         auto wetBlock = oversampling.processSamplesUp(block);
-
-        // Advance the shared threshold ramp once per oversampled frame, not once
-        // per channel, so left and right remain under identical gain conditions.
         for (size_t i = 0; i < wetBlock.getNumSamples(); ++i)
         {
             const float threshold = clipThreshold.getNextValue();
-            const float linkedLevel = juce::jmax(
-                std::abs(wetBlock.getSample(0, i)),
-                std::abs(wetBlock.getSample(1, i)));
-            const float transientAwareThreshold = getTransientThreshold(linkedLevel, threshold);
-            // Fractional clipping intensity: how far the actual peak exceeds its DETAIL-aware threshold.
-            const float excess = juce::jmax(0.0f, linkedLevel - transientAwareThreshold);
-            clippingStrengthSum += juce::jlimit(0.0f, 1.0f, excess / juce::jmax(linkedLevel, 1.0e-6f));
-            ++clippingFrames;
-            for (size_t ch = 0; ch < wetBlock.getNumChannels(); ++ch)
+            float regions[2][detailRegions] {};
+            float levels[detailRegions] {};
+            for (int ch = 0; ch < 2; ++ch)
             {
-                auto* data = wetBlock.getChannelPointer(ch);
-                data[i] = removeDc(shapeSample(data[i], transientAwareThreshold, static_cast<int>(ch)), static_cast<int>(ch));
+                separateRegions(wetBlock.getSample(static_cast<size_t>(ch), i), ch, regions[ch]);
+                for (int r = 0; r < detailRegions; ++r)
+                    levels[r] = juce::jmax(levels[r], std::abs(regions[ch][r]));
+            }
+            float protection[detailRegions] {};
+            const float attack = updateProtection(levels, protection);
+            blockTransientActivity = juce::jmax(blockTransientActivity, attack);
+            const int scopeBin = juce::jmin(scopeSize - 1,
+                static_cast<int>(i * scopeSize / juce::jmax<size_t>(1, wetBlock.getNumSamples())));
+            transientScope[(size_t)scopeBin].store(attack, std::memory_order_relaxed);
+            for (int r = 0; r < detailRegions; ++r)
+            {
+                const float excess = juce::jmax(0.0f, levels[r] - threshold);
+                clippingStrengthSum += (1.0f - protection[r])
+                    * juce::jlimit(0.0f, 1.0f, excess / juce::jmax(levels[r], 1.0e-6f));
+                ++clippingFrames;
+            }
+            for (int ch = 0; ch < 2; ++ch)
+            {
+                float sum = 0.0f;
+                for (int r = 0; r < detailRegions; ++r)
+                {
+                    const float dry = regions[ch][r];
+                    const float wet = shapeSample(dry, threshold, ch);
+                    sum += wet + protection[r] * (dry - wet);
+                }
+                auto* data = wetBlock.getChannelPointer(static_cast<size_t>(ch));
+                data[i] = removeDc(sum, ch);
             }
         }
         oversampling.processSamplesDown(block);
     }
     else
     {
-        // Mono uses the same shaping curve at the native sample rate. No
-        // oversampling latency is reported for this path.
         for (int i = 0; i < samples; ++i)
         {
             const float threshold = clipThreshold.getNextValue();
-            float linkedLevel = 0.0f;
-            for (int ch = 0; ch < channels; ++ch)
-                linkedLevel = juce::jmax(linkedLevel, std::abs(buffer.getSample(ch, i)));
-            const float transientAwareThreshold = getTransientThreshold(linkedLevel, threshold);
-            // Fractional clipping intensity: how far the actual peak exceeds its DETAIL-aware threshold.
-            const float excess = juce::jmax(0.0f, linkedLevel - transientAwareThreshold);
-            clippingStrengthSum += juce::jlimit(0.0f, 1.0f, excess / juce::jmax(linkedLevel, 1.0e-6f));
-            ++clippingFrames;
-            for (int ch = 0; ch < channels; ++ch)
+            float regions[detailRegions] {};
+            separateRegions(buffer.getSample(0, i), 0, regions);
+            float levels[detailRegions] {};
+            for (int r = 0; r < detailRegions; ++r)
+                levels[r] = std::abs(regions[r]);
+            float protection[detailRegions] {};
+            const float attack = updateProtection(levels, protection);
+            blockTransientActivity = juce::jmax(blockTransientActivity, attack);
+            const int scopeBin = juce::jmin(scopeSize - 1, i * scopeSize / juce::jmax(1, samples));
+            transientScope[(size_t)scopeBin].store(attack, std::memory_order_relaxed);
+            float sum = 0.0f;
+            for (int r = 0; r < detailRegions; ++r)
             {
-                const float input = buffer.getSample(ch, i);
-                buffer.setSample(ch, i, removeDc(shapeSample(input, transientAwareThreshold, ch), ch));
+                const float excess = juce::jmax(0.0f, levels[r] - threshold);
+                clippingStrengthSum += (1.0f - protection[r])
+                    * juce::jlimit(0.0f, 1.0f, excess / juce::jmax(levels[r], 1.0e-6f));
+                ++clippingFrames;
+                const float wet = shapeSample(regions[r], threshold, 0);
+                sum += wet + protection[r] * (regions[r] - wet);
             }
+            buffer.setSample(0, i, removeDc(sum, 0));
         }
     }
 
