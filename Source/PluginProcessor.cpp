@@ -13,6 +13,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout DPC_vstAudioProcessor::creat
 {
     using APF = juce::AudioParameterFloat;
     using Choice = juce::AudioParameterChoice;
+    using Bool = juce::AudioParameterBool;
     juce::AudioProcessorValueTreeState::ParameterLayout layout;
     layout.add(std::make_unique<Choice>("MODE", "Mode",
         juce::StringArray { "CORE", "IRON", "HEAT" }, 0));
@@ -22,6 +23,7 @@ juce::AudioProcessorValueTreeState::ParameterLayout DPC_vstAudioProcessor::creat
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 0.5f));
     layout.add(std::make_unique<APF>("MIX", "Mix",
         juce::NormalisableRange<float>(0.0f, 1.0f, 0.001f), 1.0f));
+    layout.add(std::make_unique<Bool>("STRICT_CEILING", "Strict Ceiling", false));
     layout.add(std::make_unique<APF>("OUTPUT", "Output",
         juce::NormalisableRange<float>(-24.0f, 12.0f, 0.01f), 0.0f, " dB"));
     return layout;
@@ -136,6 +138,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     const float thresholdTarget = juce::Decibels::decibelsToGain(
         -parameters.getRawParameterValue("CLIP")->load());
     const float mixTarget = parameters.getRawParameterValue("MIX")->load();
+    const bool strictCeiling = parameters.getRawParameterValue("STRICT_CEILING")->load() > 0.5f;
     float blockInputPeak = 0.0f, blockOutputPeak = 0.0f, blockClipActivity = 0.0f, blockTransientActivity = 0.0f;
     float clippingStrengthSum = 0.0f;
     int clippingFrames = 0;
@@ -335,9 +338,11 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
         }
     }
 
-    // Keep the wet ceiling valid even with DC blocker and IIR oversampling
-    // ringing (post-downsample clamp). MIX/OUTPUT may subsequently exceed it.
-    if (clipAmount > 0.0001f)
+    // OPTIONAL strict sample-peak ceiling at host rate. Hard clipping here
+    // creates additional aliasing: OFF by default. IIR decimation may overshoot
+    // the oversampled threshold even when the shaper itself is bounded.
+    // MIX/OUTPUT can exceed this ceiling regardless of the switch.
+    if (strictCeiling && clipAmount > 0.0001f)
     {
         const float hostCeiling = clipThreshold.getCurrentValue() * (1.0f + detail);
         for (int ch = 0; ch < channels; ++ch)
