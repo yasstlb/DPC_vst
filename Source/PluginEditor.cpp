@@ -81,9 +81,9 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
         g.setColour(juce::Colour(0xff9aa0a8));
         g.drawText(db == 0 ? "0 dB" : "-" + juce::String(db), 36, juce::roundToInt(y) + 2, 42, 13, juce::Justification::left);
     }
-    std::array<float, DPC_vstAudioProcessor::foldbackBands> gains {};
+    std::array<float, 24> gains {};
     for (int band = 0; band < DPC_vstAudioProcessor::foldbackBands; ++band)
-        gains[(size_t)band] = processor.getFoldbackGain(band);
+        gains[(size_t)band] = 1.0f;
     juce::Path curve, area;
     constexpr int count = 192;
     for (int i = 0; i < count; ++i)
