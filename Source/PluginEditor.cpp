@@ -42,6 +42,7 @@ DPC_vstAudioProcessorEditor::DPC_vstAudioProcessorEditor(DPC_vstAudioProcessor& 
     setSize(720, 500);
     inputSpectrum.fill(-72.0f);
     outputSpectrum.fill(-72.0f);
+    spectralDelta.fill(0.0f);
     startTimerHz(30);
 }
 
@@ -49,7 +50,7 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
 {
     const auto bg = juce::Colour(0xff111214);
     const auto panel = juce::Colour(0xff25272b);
-    const auto accent = juce::Colour(0xffe0a14b);
+    const auto accent = juce::Colour(0xffff5ca8);
     g.fillAll(bg);
     g.setColour(panel);
     g.fillRoundedRectangle(getLocalBounds().toFloat().reduced(12.0f), 12.0f);
@@ -57,75 +58,76 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     g.fillRoundedRectangle(24.0f, 76.0f, 672.0f, 2.0f, 1.0f);
     g.setColour(juce::Colour(0xff777b82));
     g.setFont(12.0f);
-    g.drawText("CLIPPER  /  LIVE TRANSIENT FOLDBACK", 26, 44, 400, 20, juce::Justification::left);
+    g.drawText("CLIPPER  /  SPECTRAL TRANSFORMATION", 26, 44, 420, 20, juce::Justification::left);
 
-    // Direct measured three-band DSP foldback; no before/after FFT comparison.
+
     const juce::Rectangle<float> graph(32.0f, 94.0f, 656.0f, 210.0f);
-    g.setColour(juce::Colour(0xff101114));
+    g.setColour(juce::Colour(0xff0c101a));
     g.fillRoundedRectangle(graph, 7.0f);
+    g.saveState();
+    g.reduceClipRegion(graph.toNearestInt());
     for (float hz : { 20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f, 20000.0f })
     {
         const float x = graph.getX() + graph.getWidth() * std::log(hz / 20.0f) / std::log(1000.0f);
-        g.setColour(juce::Colour(0xff30343a));
+        g.setColour(juce::Colour(0xff242a39));
         g.drawVerticalLine(juce::roundToInt(x), graph.getY(), graph.getBottom());
-        g.setColour(juce::Colour(0xff9aa0a8));
-        g.setFont(10.0f);
-        g.drawText(hz >= 1000.0f ? juce::String(hz / 1000.0f, 0) + "k" : juce::String(hz, 0),
-                   juce::roundToInt(x - 18.0f), 308, 36, 14, juce::Justification::centred);
     }
-    for (int db = 0; db <= 12; db += 3)
+    for (int db = -72; db <= 0; db += 12)
     {
-        const float y = graph.getY() + graph.getHeight() * static_cast<float>(db) / 12.0f;
-        g.setColour(juce::Colour(0xff30343a));
+        const float y = graph.getBottom() - graph.getHeight() * (db + 90.0f) / 90.0f;
+        g.setColour(juce::Colour(0xff242a39));
         g.drawHorizontalLine(juce::roundToInt(y), graph.getX(), graph.getRight());
-        g.setColour(juce::Colour(0xff9aa0a8));
-        g.drawText(db == 0 ? "0 dB" : "-" + juce::String(db), 36, juce::roundToInt(y) + 2, 42, 13, juce::Justification::left);
     }
-    std::array<float, 24> gains {};
-    for (int band = 0; band < 24; ++band)
-        gains[(size_t)band] = 1.0f;
-    juce::Path curve, area;
-    constexpr int count = 192;
-    for (int i = 0; i < count; ++i)
+    juce::Path inputArea, outputLine, changeLine;
+    for (int i = 0; i < spectrumPoints; ++i)
     {
-        const float fraction = static_cast<float>(i) / static_cast<float>(count - 1);
-        const float hz = 20.0f * std::pow(1000.0f, fraction);
-        // Interpolate between 24 log-spaced DSP band measurements.
-        const float bandPosition = juce::jlimit(0.0f,
-            static_cast<float>(24 - 1),
-            std::log(hz / 20.0f) / std::log(1000.0f) *
-                static_cast<float>(24) - 0.5f);
-        const int lower = juce::jlimit(0, 24 - 1,
-            static_cast<int>(bandPosition));
-        const int upper = juce::jmin(24 - 1, lower + 1);
-        const float t = bandPosition - static_cast<float>(lower);
-        const float gain = gains[(size_t)lower] + t * (gains[(size_t)upper] - gains[(size_t)lower]);
-        const float reduction = juce::jlimit(0.0f, 12.0f,
-            -juce::Decibels::gainToDecibels(juce::jmax(1.0e-5f, gain)));
-        const float x = graph.getX() + fraction * graph.getWidth();
-        const float y = graph.getY() + graph.getHeight() * reduction / 12.0f;
+        const float x = graph.getX() + graph.getWidth() * static_cast<float>(i) / (spectrumPoints - 1);
+        const auto position = [&graph](float db)
+        {
+            return graph.getBottom() - graph.getHeight() * juce::jlimit(0.0f, 1.0f, (db + 90.0f) / 90.0f);
+        };
+        const float inY = position(inputSpectrum[(size_t)i]);
+        const float outY = position(outputSpectrum[(size_t)i]);
+        const float attenuation = juce::jlimit(0.0f, 18.0f, -spectralDelta[(size_t)i]);
+        const float changeY = graph.getY() + graph.getHeight() * attenuation / 18.0f;
         if (i == 0)
         {
-            curve.startNewSubPath(x, y);
-            area.startNewSubPath(x, graph.getY());
+            inputArea.startNewSubPath(x, graph.getBottom());
+            inputArea.lineTo(x, inY);
+            outputLine.startNewSubPath(x, outY);
+            changeLine.startNewSubPath(x, changeY);
         }
-        else curve.lineTo(x, y);
-        area.lineTo(x, y);
+        else
+        {
+            inputArea.lineTo(x, inY);
+            outputLine.lineTo(x, outY);
+            changeLine.lineTo(x, changeY);
+        }
     }
-    area.lineTo(graph.getRight(), graph.getY());
-    area.closeSubPath();
-    g.setColour(juce::Colour(0x55e0a14b));
-    g.fillPath(area);
+    inputArea.lineTo(graph.getRight(), graph.getBottom());
+    inputArea.closeSubPath();
+    g.setColour(juce::Colour(0x883578ff));
+    g.fillPath(inputArea);
+    g.setColour(juce::Colour(0xff69baf6));
+    g.strokePath(outputLine, juce::PathStrokeType(1.3f));
     g.setColour(accent);
-    g.strokePath(curve, juce::PathStrokeType(2.4f));
+    g.strokePath(changeLine, juce::PathStrokeType(2.0f));
+    g.restoreState();
+    g.setColour(juce::Colour(0xffa3a9ba));
+    g.setFont(10.0f);
+    for (float hz : { 20.0f, 50.0f, 100.0f, 200.0f, 500.0f, 1000.0f, 2000.0f, 5000.0f, 10000.0f, 20000.0f })
+    {
+        const float x = graph.getX() + graph.getWidth() * std::log(hz / 20.0f) / std::log(1000.0f);
+        g.drawText(hz >= 1000.0f ? juce::String(hz / 1000.0f, 0) + "k" : juce::String(hz, 0),
+                   juce::roundToInt(x - 17.0f), 308, 34, 14, juce::Justification::centred);
+    }
     g.setColour(juce::Colour(0xffd2d6dc));
     g.setFont(12.0f);
-    g.drawText("LIVE TRANSIENT FOLDBACK", 42, 101, 320, 20, juce::Justification::left);
+    g.drawText("LIVE SPECTRAL TRANSFORMATION", 42, 101, 330, 20, juce::Justification::left);
     g.setColour(juce::Colour(0xff949ba5));
     g.setFont(10.0f);
-    g.drawText("0 dB = preserved  |  Downward = more DSP foldback  |  CLIP and DETAIL", 36, 330, 640, 18, juce::Justification::left);
-    g.drawText("Curve interpolates 24 real DSP bands across 20 Hz - 20 kHz.",
-               36, 351, 640, 18, juce::Justification::left);
+    g.drawText("BLUE: input energy   /   CYAN: output energy   /   PINK: spectral attenuation", 36, 330, 645, 18, juce::Justification::left);
+    g.drawText("Measured FFT difference (not a per-frequency clipping or transient-protection map).", 36, 351, 645, 18, juce::Justification::left);
 }
 
 void DPC_vstAudioProcessorEditor::timerCallback()
@@ -134,7 +136,43 @@ void DPC_vstAudioProcessorEditor::timerCallback()
     repaint();
 }
 
-void DPC_vstAudioProcessorEditor::updateSpectrum() {}
+void DPC_vstAudioProcessorEditor::updateSpectrum()
+{
+    const int writePosition = processor.getSpectrumWritePosition();
+    const double sampleRate = processor.getSpectrumSampleRate();
+    if (sampleRate <= 0.0) return;
+    fftInput.fill(0.0f);
+    fftOutput.fill(0.0f);
+    constexpr int n = DPC_vstAudioProcessor::fftSize;
+    for (int i = 0; i < n; ++i)
+    {
+        const int index = (writePosition + i) % n;
+        const float window = 0.5f - 0.5f * std::cos(
+            juce::MathConstants<float>::twoPi * static_cast<float>(i) / static_cast<float>(n - 1));
+        fftInput[(size_t)i] = processor.getSpectrumInput(index) * window;
+        fftOutput[(size_t)i] = processor.getSpectrumOutput(index) * window;
+    }
+    fft.performFrequencyOnlyForwardTransform(fftInput.data());
+    fft.performFrequencyOnlyForwardTransform(fftOutput.data());
+    for (int i = 0; i < spectrumPoints; ++i)
+    {
+        const float f = static_cast<float>(i) / static_cast<float>(spectrumPoints - 1);
+        const float hz = 20.0f * std::pow(1000.0f, f);
+        const float bin = hz * static_cast<float>(n) / static_cast<float>(sampleRate);
+        const int lo = juce::jlimit(1, n / 2 - 1, static_cast<int>(bin));
+        const int hi = lo + 1;
+        const float t = juce::jlimit(0.0f, 1.0f, bin - static_cast<float>(lo));
+        const float in = juce::jmap(t, fftInput[(size_t)lo], fftInput[(size_t)hi]);
+        const float out = juce::jmap(t, fftOutput[(size_t)lo], fftOutput[(size_t)hi]);
+        // Hann coherent gain is approximately N/4 for real-input FFT magnitudes.
+        const float inputDb = juce::Decibels::gainToDecibels(in / (n * 0.25f), -90.0f);
+        const float outputDb = juce::Decibels::gainToDecibels(out / (n * 0.25f), -90.0f);
+        const float delta = inputDb > -72.0f ? outputDb - inputDb : 0.0f;
+        inputSpectrum[(size_t)i] += 0.32f * (inputDb - inputSpectrum[(size_t)i]);
+        outputSpectrum[(size_t)i] += 0.32f * (outputDb - outputSpectrum[(size_t)i]);
+        spectralDelta[(size_t)i] += 0.28f * (delta - spectralDelta[(size_t)i]);
+    }
+}
 
 void DPC_vstAudioProcessorEditor::resized()
 {
