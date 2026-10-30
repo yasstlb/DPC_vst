@@ -57,6 +57,20 @@ private:
     int oversamplingLatency = 0;
     juce::AudioBuffer<float> dryBuffer;
 
+    // Complementary 3-region crossover (~180 Hz / ~2.8 kHz).
+    // Per-region linked fast/slow transient detectors, with independent
+    // detail-preservation bypass. This is NOT an FFT-bin-by-bin processor.
+    static constexpr int detailRegions = 3;
+    float detailSplit[2][2] {};
+    float detailFast[detailRegions] {};
+    float detailSlow[detailRegions] {};
+    float detailProtect[detailRegions] {};
+    float detailSplitCoeff[2] {};
+    float detailEnvelopeFastAttack = 0.0f;
+    float detailEnvelopeFastRelease = 0.0f;
+    float detailEnvelopeSlowAttack = 0.0f;
+    float detailEnvelopeSlowRelease = 0.0f;
+
     // Broadband transient detector; spectral analysis is performed on the UI thread.
     // Stateful, per-channel colour stages. No dynamic allocation in the sample loop.
     float ironMemory[2] {};
