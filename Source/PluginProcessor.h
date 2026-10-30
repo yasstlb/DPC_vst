@@ -58,6 +58,15 @@ private:
     juce::AudioBuffer<float> dryBuffer;
 
     // Broadband transient detector; spectral analysis is performed on the UI thread.
+    // Stateful, per-channel colour stages. No dynamic allocation in the sample loop.
+    float ironMemory[2] {};
+    float ironLow[2] {};
+    float heatLow[2] {};
+    float heatAir[2] {};
+    float ironMemoryCoeff = 0.0f;
+    float ironLowCoeff = 0.0f;
+    float heatLowCoeff = 0.0f;
+    float heatAirCoeff = 0.0f;
     float fastEnvelope = 0.0f;
     float slowEnvelope = 0.0f;
     float dcInput[2] = { 0.0f, 0.0f };
