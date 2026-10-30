@@ -133,8 +133,8 @@ void DPC_vstAudioProcessorEditor::paint(juce::Graphics& g)
     g.drawText("LIVE SPECTRAL TRANSFORMATION", 42, 101, 330, 20, juce::Justification::left);
     g.setColour(juce::Colour(0xff949ba5));
     g.setFont(10.0f);
-    g.drawText("BLUE: input   /   CYAN: wet after clipping   /   PINK: nonlinear spectral changes", 36, 330, 645, 18, juce::Justification::left);
-    g.drawText("Pink starts flat; CLIP and DETAIL change the measured spectral response.", 36, 351, 645, 18, juce::Justification::left);
+    g.drawText("BLUE: input   /   CYAN: wet after clipping   /   PINK: DETAIL reinjected residual", 36, 330, 645, 18, juce::Justification::left);
+    g.drawText("Pink follows measured frequency content restored by DETAIL (flat at zero).", 36, 351, 645, 18, juce::Justification::left);
 }
 
 void DPC_vstAudioProcessorEditor::timerCallback()
@@ -152,6 +152,7 @@ void DPC_vstAudioProcessorEditor::updateSpectrum()
     transientGlow += 0.22f * (processor.getTransientActivity() - transientGlow);
     fftInput.fill(0.0f);
     fftOutput.fill(0.0f);
+    fftReinjection.fill(0.0f);
     constexpr int n = DPC_vstAudioProcessor::fftSize;
     for (int i = 0; i < n; ++i)
     {
@@ -160,9 +161,11 @@ void DPC_vstAudioProcessorEditor::updateSpectrum()
             juce::MathConstants<float>::twoPi * static_cast<float>(i) / static_cast<float>(n - 1));
         fftInput[(size_t)i] = processor.getSpectrumInput(index) * window;
         fftOutput[(size_t)i] = processor.getSpectrumOutput(index) * window;
+        fftReinjection[(size_t)i] = processor.getSpectrumReinjection(index) * window;
     }
     fft.performFrequencyOnlyForwardTransform(fftInput.data());
     fft.performFrequencyOnlyForwardTransform(fftOutput.data());
+    fft.performFrequencyOnlyForwardTransform(fftReinjection.data());
     for (int i = 0; i < spectrumPoints; ++i)
     {
         const float f = static_cast<float>(i) / static_cast<float>(spectrumPoints - 1);
@@ -180,17 +183,19 @@ void DPC_vstAudioProcessorEditor::updateSpectrum()
         inputSpectrum[(size_t)i] += 0.32f * (inputDb - inputSpectrum[(size_t)i]);
         outputSpectrum[(size_t)i] += 0.32f * (outputDb - outputSpectrum[(size_t)i]);
         spectralDelta[(size_t)i] += 0.28f * (delta - spectralDelta[(size_t)i]);
-        // Compare the actual wet spectrum with the input. Both increases
-        // (new harmonics) and decreases (redistributed energy) contribute.
-        // DETAIL acts through the real transient-aware clipping threshold;
-        // the UI does not fabricate its own frequency mask.
-        const float clipAmount = processor.parameters.getRawParameterValue("CLIP")->load();
-        const float validEnergy = juce::jlimit(0.0f, 1.0f,
-            (juce::jmax(inputDb, outputDb) + 77.0f) / 22.0f);
-        const float changeDb = std::abs(outputDb - inputDb);
-        const float deviation = clipAmount > 0.001f
-            ? juce::jlimit(0.0f, 1.0f, changeDb / 18.0f) * validEnergy
-            : 0.0f;
+        // Pink = actually reinjected DETAIL residual, not input/output
+        // difference. At DETAIL=0 there is no reinjection; the line is flat.
+        const float reinjectedMagnitude = juce::jmap(t,
+            fftReinjection[(size_t)lo], fftReinjection[(size_t)hi]);
+        const float reinjectionDb = juce::Decibels::gainToDecibels(
+            reinjectedMagnitude / (n * 0.25f), -90.0f);
+        const float detail = processor.parameters.getRawParameterValue("DETAIL")->load();
+        const float usableEnergy = juce::jlimit(0.0f, 1.0f,
+            (reinjectionDb + 82.0f) / 52.0f);
+        const float ratio = juce::jlimit(0.0f, 1.0f,
+            (reinjectionDb - inputDb + 28.0f) / 30.0f);
+        const float deviation = detail > 0.001f
+            ? usableEnergy * ratio : 0.0f;
         // Faster attack, relaxed release for visible but stable spectral motion.
         const float speed = deviation > foldShape[(size_t)i] ? 0.42f : 0.19f;
         foldShape[(size_t)i] += speed * (deviation - foldShape[(size_t)i]);
