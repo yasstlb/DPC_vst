@@ -179,7 +179,7 @@ void DPC_vstAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer, juce:
     // CORE has unity small-signal slope. IRON and HEAT apply ONLY the
     // nonlinear residual, avoiding their former small-signal amplification
     // and removing the linear coloration of their internal filters.
-    const auto shapeSample = [this, mode, clipAmount](float input, float threshold, int ch
+    const auto shapeSample = [this, mode, clipAmount](float input, float threshold, int ch)
     {
         if (clipAmount <= 0.0001f) return input;
         const float safeThreshold = juce::jmax(threshold, 1.0e-5f);
